@@ -1,0 +1,539 @@
+export type BiomeType = 'grassland' | 'forest' | 'arid' | 'tundra';
+export type WeatherType = 'sunny' | 'rain' | 'drought' | 'storm' | 'thunderstorm';
+export type SeasonType = 'Primavera' | 'Verano' | 'Otoño' | 'Invierno';
+export type LayoutMode = 'auto' | 'vertical' | 'horizontal';
+
+export type DivineTool =
+  | 'inspect'
+  | 'add_road'
+  | 'food'
+  | 'wood'
+  | 'pine_wood'
+  | 'maple_wood'
+  | 'oak_wood'
+  | 'stone'
+  | 'copper'
+  | 'iron'
+  | 'gold'
+  | 'silver'
+  | 'coins'
+  | 'knowledge'
+  | 'kill_crop'
+  | 'lightning_storm'
+  | 'start_fire'
+  | 'heal'
+  | 'infect'
+  | 'sterilize'
+  | 'kill';
+
+export type JobType =
+  | 'Aprendiz'
+  | 'Recolector'
+  | 'Agricultor'
+  | 'Pescador'
+  | 'Leñador'
+  | 'Carpintero'
+  | 'Minero'
+  | 'Constructor'
+  | 'Curandero'
+  | 'Maestro'
+  | 'Erudito'
+  | 'Comerciante'
+  | 'Banquero'
+  | 'Panadero'
+  | 'Herrero'
+  | 'Artesano'
+  | 'Boticario'
+  | 'Guardián'
+  | 'Alcalde'
+  | 'Comisario'
+  | 'Almacenero';
+
+export type TaskType =
+  | 'idle'
+  | 'eat'
+  | 'sleep'
+  | 'gather_food'
+  | 'farm_crops'
+  | 'fish_river'
+  | 'tend_livestock'
+  | 'gather_wood'
+  | 'gather_stone'
+  | 'gather_copper'
+  | 'gather_iron'
+  | 'gather_gold'
+  | 'gather_silver'
+  | 'craft_tools'
+  | 'manage_building'
+  | 'caravan'
+  | 'repair_building'
+  | 'extinguish_fire'
+  | 'store_home'
+  | 'build_house'
+  | 'upgrade_house'
+  | 'build_plaza'
+  | 'build_bridge'
+  | 'plant_farm'
+  | 'build_special'
+  | 'heal_other'
+  | 'research'
+  | 'trade'
+  | 'socialize';
+
+export type EmotionType =
+  | 'happy'
+  | 'excited'
+  | 'content'
+  | 'neutral'
+  | 'sad'
+  | 'depressed'
+  | 'love'
+  | 'scared'
+  | 'sick';
+
+export type EraId = 'primitive' | 'stone' | 'wood' | 'iron' | 'civilization';
+
+export type SpecialBuildingType =
+  | 'infirmary'
+  | 'school'
+  | 'market'
+  | 'bank'
+  | 'forge'
+  | 'bakery'
+  | 'carpentry'
+  | 'apothecary'
+  | 'dock'
+  | 'general_depot'
+  | 'town_hall'
+  | 'police_station'
+  | 'prison';
+
+export type WoodGrade = 'pine' | 'maple' | 'oak';
+
+export type AnimalType =
+  | 'cat'
+  | 'dog'
+  | 'wildcat'
+  | 'bear'
+  | 'fish'
+  | 'chicken'
+  | 'cow'
+  | 'horse'
+  | 'sheep';
+
+export type FishVariant = 'trout' | 'salmon' | 'goldfish' | 'catfish';
+
+export type DiseaseId = 'gripe' | 'dolor_estomacal' | 'pulmonia' | 'sepsis' | 'cancer';
+
+export interface DiseaseInfo {
+  id: DiseaseId;
+  name: string;
+  dangerPct: number;
+  baseChancePct: number;
+  incurable: boolean;
+  daysInfected: number;
+  fatalAfterDays: number | null;
+}
+
+export interface PregnancyState {
+  partnerId: number;
+  daysRemaining: number;
+  conceptionDay: number;
+}
+
+export type JobMasteryTier = 'operario' | 'comerciante' | 'maestro';
+
+export type VillageLawId =
+  | 'ban_trade_wood'
+  | 'ban_fishing'
+  | 'ban_trade_bread'
+  | 'ban_mine_gold'
+  | 'winter_rationing'
+  | 'night_watch'
+  | 'mining_priority';
+
+export interface VillageLaw {
+  id: VillageLawId;
+  name: string;
+  description: string;
+  active: boolean;
+  proposedBy: string;
+  enactedDay: number | null;
+}
+
+export interface VillagePetition {
+  id: number;
+  representativeId: number;
+  representativeName: string;
+  kind: 'peticion' | 'consulta' | 'queja';
+  isNegative: boolean;
+  title: string;
+  message: string;
+  createdDay: number;
+}
+
+export interface FireHazard {
+  id: number;
+  x: number;
+  y: number;
+  intensity: number;
+  targetKind: 'house' | 'special' | 'forest' | 'farm';
+  targetId?: number;
+  cause: string;
+}
+
+export interface BankLoan {
+  id: number;
+  borrowerId: number;
+  borrowerName: string;
+  amount: number;
+  remaining: number;
+  interestPct: number;
+  purpose: string;
+  issuedDay: number;
+}
+
+export interface Animal {
+  id: number;
+  type: AnimalType;
+  name: string;
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  hostile: boolean;
+  tamed: boolean;
+  ownerId: number | null;
+  hp: number;
+  maxHp: number;
+  foodYield: number;
+  milkReady: number; // 0..100 para vacas
+  woolReady: number; // 0..100 para ovejas
+  fishVariant?: FishVariant;
+  riderId: number | null;
+  cooldown: number;
+  walkFrame: number;
+}
+
+export interface ResourceInventory {
+  food: number;
+  wood: number;
+  pineWood: number;
+  mapleWood: number;
+  oakWood: number;
+  stone: number;
+  copper: number;
+  iron: number;
+  gold: number;
+  silver: number;
+}
+
+export interface HouseStorage extends ResourceInventory {
+  coins: number;
+  milk: number;
+  bread: number;
+  tools: number;
+  medicine: number;
+}
+
+export interface SkillDefinition {
+  id: string;
+  minKnowledgePct: number;
+  name: string;
+  description: string;
+}
+
+export interface EconomyReserve {
+  goldReserve: number;
+  silverReserve: number;
+  backedCoinsCapacity: number;
+  mintedCoins: number;
+  bankLoanPool: number;
+  taxRatePct: number;
+  lastTaxCollectedDay: number;
+}
+
+export interface Agent {
+  id: number;
+  name: string;
+  sex: 'M' | 'F';
+  x: number;
+  y: number;
+  ageYears: number;
+  isChild: boolean;
+  isElder: boolean;
+  hunger: number;
+  energy: number;
+  health: number;
+  isSick: boolean;
+  illnessName: string | null;
+  illness: DiseaseInfo | null;
+  happiness: number;
+  education: number; // 0..100 Saber general (único editable por el jugador; desbloquea 25 skills)
+  carpentryKnowledge: number; // 0..100 progresivo en Carpintería (10% Pino, 50% Arce, 80% Roble)
+  constructionKnowledge: number; // 0..100 progresivo en Construcción
+  jobMastery: Partial<Record<JobType, number>>; // 0..100 por oficio (<=30 Operario, 31-70 Comerciante, >70 Maestro máx 3)
+  skills: string[];
+  mentorId: number | null;
+  loanDebt: number;
+  jailedDays: number;
+  isRepresentative: boolean;
+  isSterile: boolean;
+  wantsChildren: boolean;
+  pregnancy: PregnancyState | null;
+  coins: number;
+  inv: ResourceInventory;
+  milkCount: number;
+  breadCount: number;
+  toolsCount: number;
+  medicineCount: number;
+  job: JobType;
+  houseId: number | null;
+  assignedBuildingId: number | null;
+  mountedHorseId: number | null;
+  skin: string;
+  shirt: string;
+  hairStyle: 'short' | 'long' | 'mohawk' | 'curly' | 'ponytail' | 'bald';
+  hairColor: string;
+  partnerId: number | null;
+  exPartnerIds: number[];
+  parents: string | null;
+  childrenCount: number;
+  emotion: EmotionType;
+  talkingTimer: number;
+  lastDialogue: string | null;
+  lastQwenDecision: string | null;
+  qwenPlan: string;
+  taskType: TaskType;
+  taskTimer: number;
+  taskTargetId: number | null;
+  activity: string;
+  thought: string;
+  importance: number;
+  walkFrame: number;
+  reproductionCooldown: number;
+  moodModifier: number;
+}
+
+export interface House {
+  id: number;
+  name: string;
+  x: number;
+  y: number;
+  zone: 'south' | 'north';
+  size: 'small' | 'medium' | 'large';
+  level: 1 | 2 | 3 | 4;
+  capacity: number; // Chica: 4, Mediana: 6, Grande: 8
+  comfortBonus: number;
+  durability: number; // 0..100
+  builderName: string;
+  storage: HouseStorage; // Las viviendas solo almacenan Alimento (food) y Monedas (coins)
+}
+
+export interface SpecialBuilding {
+  id: number;
+  type: SpecialBuildingType;
+  name: string;
+  category: 'hospital' | 'school' | 'commerce' | 'civic' | 'depot';
+  x: number;
+  y: number;
+  level: number;
+  builderName: string;
+  ownerId: number | null;
+  forSale: boolean;
+  price: number;
+  durability: number; // 0..100
+  staffIds: number[];
+  isOperational: boolean;
+  allowedStorage: Array<keyof HouseStorage>;
+  storage: HouseStorage;
+}
+
+export interface PlazaStructure {
+  x: number;
+  y: number;
+  builderName: string;
+  builtDay: number;
+}
+
+export interface BridgeStructure {
+  x: number;
+  builderName: string;
+  builtDay: number;
+  durability: number;
+}
+
+export interface FarmPlot {
+  id: number;
+  x: number;
+  y: number;
+  size: 'small' | 'medium' | 'large';
+  growth: number;
+  cropName: string;
+}
+
+export interface RoadTile {
+  id: number;
+  x: number;
+  y: number;
+  lit: boolean;
+}
+
+export interface ResourceNode {
+  id: number;
+  type:
+    | 'food'
+    | 'wood'
+    | 'pine_wood'
+    | 'maple_wood'
+    | 'oak_wood'
+    | 'stone'
+    | 'copper'
+    | 'iron'
+    | 'gold'
+    | 'silver'
+    | 'coins';
+  x: number;
+  y: number;
+  amount: number;
+  maxAmount: number;
+  depleted: boolean;
+  restTimer: number;
+}
+
+export interface LogEntry {
+  id: number;
+  day: number;
+  text: string;
+  tone: 'emerald' | 'amber' | 'rose' | 'sky' | 'violet' | 'slate';
+}
+
+export interface DaySnapshot {
+  day: number;
+  population: number;
+  avgHealth: number;
+  avgHappiness: number;
+  houses: number;
+  knowledge: number;
+  totalCoins: number;
+}
+
+export interface QwenPolicyState {
+  buildPriority: boolean;
+  workFocus: boolean;
+  evolutionFocus: boolean;
+  economyFocus: boolean;
+  farmingFocus: boolean;
+  reproductionRestraint: boolean;
+  healthPriority: boolean;
+  allowPartnerSwitch: boolean;
+  moodDirective: 'neutral' | 'optimistic' | 'disciplined';
+}
+
+export interface QwenMessage {
+  id: number;
+  role: 'user' | 'qwen';
+  text: string;
+  appliedRules?: string[];
+  source: 'ollama' | 'local';
+}
+
+export interface OllamaConfig {
+  enabled: boolean;
+  url: string;
+  model: string;
+}
+
+export type SelectedEntity =
+  | { kind: 'agent'; id: number }
+  | { kind: 'house'; id: number }
+  | { kind: 'special'; id: number }
+  | { kind: 'farm'; id: number }
+  | { kind: 'animal'; id: number }
+  | { kind: 'plaza' }
+  | { kind: 'bridge' };
+
+export interface SimulationState {
+  day: number;
+  minute: number;
+  speed: 0 | 1 | 2 | 4;
+  resourcesPaused: boolean;
+  season: SeasonType;
+  layoutMode: LayoutMode;
+  biome: BiomeType;
+  weather: WeatherType;
+  tool: DivineTool;
+  selectedAgentId: number | null;
+  selectedEntity: SelectedEntity | null;
+  highlightFamilyAgentId: number | null;
+  knowledge: number;
+  era: EraId;
+  economyReserve: EconomyReserve;
+  riverFishStock: number;
+  riverFishMaxStock: number;
+  riverFishRestTimer: number;
+  laws: VillageLaw[];
+  fires: FireHazard[];
+  loans: BankLoan[];
+  representativeAgentId: number | null;
+  petitionTimerSec: number;
+  pendingPetition: VillagePetition | null;
+  autoPausedByPetition: boolean;
+  previousSpeedBeforePetition: 0 | 1 | 2 | 4;
+  lightningFlashTimer: number;
+  lastCouncilDay: number;
+  nextId: number;
+  agents: Agent[];
+  houses: House[];
+  specialBuildings: SpecialBuilding[];
+  plaza: PlazaStructure | null;
+  bridge: BridgeStructure | null;
+  farms: FarmPlot[];
+  roads: RoadTile[];
+  resources: ResourceNode[];
+  animals: Animal[];
+  rainDrops: Array<{ x: number; y: number; s: number }>;
+  history: DaySnapshot[];
+  policies: QwenPolicyState;
+  ollama: OllamaConfig;
+  logs: LogEntry[];
+  qwenMessages: QwenMessage[];
+}
+
+export type QwenAction =
+  | { type: 'BUILD_HOUSES'; count: number; zone?: 'south' | 'north' }
+  | { type: 'UPGRADE_HOUSES'; count: number }
+  | { type: 'BUILD_PLAZA' }
+  | { type: 'BUILD_BRIDGE' }
+  | { type: 'BUILD_SPECIAL'; buildingType: SpecialBuildingType }
+  | { type: 'PLANT_CROPS'; count: number; zone?: 'south' | 'north' }
+  | { type: 'KILL_CROPS' }
+  | { type: 'ADD_ROADS' }
+  | { type: 'GENERATE_ECONOMY' }
+  | { type: 'ALLOW_MORE_VILLAGERS'; spawnCount?: number }
+  | { type: 'ASSIGN_ACTIVE_JOBS'; preferredJob?: JobType }
+  | {
+      type: 'DIRECT_VILLAGER';
+      agentName: string;
+      job?: JobType;
+      action?: 'heal' | 'build' | 'trade' | 'research' | 'switch_partner' | 'fish' | 'store_home';
+    }
+  | { type: 'SPAWN_ANIMAL'; animalType: AnimalType; count: number }
+  | { type: 'BOOST_EVOLUTION'; knowledgeGain: number }
+  | { type: 'SET_POLICIES'; patch: Partial<QwenPolicyState> }
+  | { type: 'HEAL_VILLAGERS' }
+  | {
+      type: 'ADD_VILLAGE_RESOURCES';
+      resource: 'food' | 'wood' | 'stone' | 'copper' | 'iron' | 'gold' | 'silver';
+      count: number;
+    }
+  | { type: 'PAUSE_RESOURCES'; paused: boolean }
+  | { type: 'ADJUST_VILLAGE_MOOD'; delta: number; thought?: string }
+  | { type: 'TOGGLE_LAW'; lawId: VillageLawId; active: boolean }
+  | { type: 'TRIGGER_LIGHTNING_STORM' }
+  | { type: 'TRIGGER_FIRE' }
+  | { type: 'ELECT_REPRESENTATIVE' }
+  | { type: 'ISSUE_BANK_LOANS' }
+  | { type: 'FORM_MENTORSHIPS' }
+  | { type: 'REPAIR_BUILDINGS' }
+  | { type: 'RUN_CARAVANS' };
