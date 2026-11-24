@@ -161,12 +161,24 @@ export interface VillageLaw {
   enactedDay: number | null;
 }
 
+export type PetitionEffectType =
+  | 'wealth'
+  | 'health_aid'
+  | 'housing_materials'
+  | 'food_supply'
+  | 'knowledge_boost'
+  | 'morale_blessing'
+  | 'negative_overwork'
+  | 'negative_ration_cut';
+
 export interface VillagePetition {
   id: number;
   representativeId: number;
   representativeName: string;
   kind: 'peticion' | 'consulta' | 'queja';
   isNegative: boolean;
+  effectType?: PetitionEffectType;
+  effectSummary?: string;
   title: string;
   message: string;
   createdDay: number;
@@ -541,6 +553,16 @@ export type SelectedEntity =
   | { kind: 'plaza' }
   | { kind: 'bridge' };
 
+export interface FloatingEffect {
+  id: number;
+  x: number;
+  y: number;
+  text: string;
+  color: string;
+  ttl: number;
+  maxTtl: number;
+}
+
 export interface SimulationState {
   day: number;
   minute: number;
@@ -592,6 +614,7 @@ export interface SimulationState {
   logs: LogEntry[];
   resourceLedger: ResourceOperationRecord[];
   qwenMessages: QwenMessage[];
+  floatingEffects: FloatingEffect[];
 }
 
 export type QwenAction =
@@ -606,7 +629,14 @@ export type QwenAction =
   | { type: 'ADD_ROADS'; roadType?: RoadType; withLamp?: boolean }
   | { type: 'GENERATE_ECONOMY' }
   | { type: 'ALLOW_MORE_VILLAGERS'; spawnCount?: number }
-  | { type: 'ASSIGN_ACTIVE_JOBS'; preferredJob?: JobType }
+  | {
+      type: 'ASSIGN_ACTIVE_JOBS';
+      preferredJob?: JobType;
+      count?: number;
+      fraction?: number;
+      fromJob?: JobType;
+      forceChange?: boolean;
+    }
   | {
       type: 'DIRECT_VILLAGER';
       agentName: string;
@@ -622,6 +652,21 @@ export type QwenAction =
       resource: 'food' | 'wood' | 'stone' | 'copper' | 'iron' | 'gold' | 'silver';
       count: number;
     }
+  | {
+      type: 'GRANT_VILLAGER_ITEMS';
+      resource: keyof ResourceInventory | 'coins' | 'bread' | 'tools' | 'medicine';
+      amount: number;
+      targetName?: string;
+    }
+  | {
+      type: 'ADJUST_STAT';
+      stat: 'knowledge' | 'health' | 'energy' | 'happiness';
+      delta: number;
+      targetName?: string;
+    }
+  | { type: 'SET_WEATHER_BIOME'; weather?: WeatherType; biome?: BiomeType; season?: SeasonType }
+  | { type: 'RELEASE_PRISONERS'; targetName?: string }
+  | { type: 'REPORT_DATA'; answer: string }
   | { type: 'PAUSE_RESOURCES'; paused: boolean }
   | { type: 'ADJUST_VILLAGE_MOOD'; delta: number; thought?: string }
   | { type: 'TOGGLE_LAW'; lawId: VillageLawId; active: boolean }

@@ -336,6 +336,7 @@ export function hydrateSimulationState(parsed: Partial<SimulationState>): Simula
         })
       : [],
     rainDrops: Array.isArray(parsed.rainDrops) && parsed.rainDrops.length > 0 ? parsed.rainDrops : base.rainDrops,
+    floatingEffects: [],
   };
 
   syncSpecialBuildingStaff(nextState);
@@ -349,11 +350,29 @@ export default function App() {
   const cameraRef = useRef<CameraView>({ zoom: 1, panX: 0, panY: 0 });
   const isPointerOverMapRef = useRef(false);
   const roadPaintingRef = useRef(false);
+  const panDragRef = useRef<{
+    active: boolean;
+    button: number;
+    startClientX: number;
+    startClientY: number;
+    startPanX: number;
+    startPanY: number;
+    moved: boolean;
+  }>({
+    active: false,
+    button: 0,
+    startClientX: 0,
+    startClientY: 0,
+    startPanX: 0,
+    startPanY: 0,
+    moved: false,
+  });
   const savingToServerRef = useRef(false);
   const hydratedRef = useRef(false);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [tickVersion, setTickVersion] = useState(0);
+  const [isDraggingMap, setIsDraggingMap] = useState(false);
   const [isOllamaOpen, setIsOllamaOpen] = useState(false);
   const [isStatsOpen, setIsStatsOpen] = useState(false);
   const [isFamiliesOpen, setIsFamiliesOpen] = useState(false);
@@ -503,16 +522,31 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
-  // Zoom SOLO con la rueda del mouse sobre el mapa
+  // Zoom con la rueda del mouse centrado en la posición del cursor
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       const delta = e.deltaY < 0 ? 0.2 : -0.2;
-      const z = clamp(Math.round((cameraRef.current.zoom + delta) * 100) / 100, 0.6, 3.2);
-      const clamped = clampPan(cameraRef.current.panX, cameraRef.current.panY, z);
-      cameraRef.current = { zoom: z, panX: clamped.panX, panY: clamped.panY };
+      const z0 = cameraRef.current.zoom;
+      const z1 = clamp(Math.round((z0 + delta) * 100) / 100, 0.6, 3.2);
+      if (z1 === z0) return;
+
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        const canvasX = (e.clientX - rect.left) * (CANVAS_WIDTH / rect.width);
+        const canvasY = (e.clientY - rect.top) * (CANVAS_HEIGHT / rect.height);
+        const wx = (canvasX - CANVAS_WIDTH / 2 - cameraRef.current.panX) / z0 + CANVAS_WIDTH / 2;
+        const wy = (canvasY - CANVAS_HEIGHT / 2 - cameraRef.current.panY) / z0 + CANVAS_HEIGHT / 2;
+        const nextPanX = canvasX - CANVAS_WIDTH / 2 - (wx - CANVAS_WIDTH / 2) * z1;
+        const nextPanY = canvasY - CANVAS_HEIGHT / 2 - (wy - CANVAS_HEIGHT / 2) * z1;
+        const clamped = clampPan(nextPanX, nextPanY, z1);
+        cameraRef.current = { zoom: z1, panX: clamped.panX, panY: clamped.panY };
+      } else {
+        const clamped = clampPan(cameraRef.current.panX, cameraRef.current.panY, z1);
+        cameraRef.current = { zoom: z1, panX: clamped.panX, panY: clamped.panY };
+      }
       syncUI();
     };
     canvas.addEventListener('wheel', onWheel, { passive: false });
@@ -798,7 +832,13 @@ export default function App() {
 
   function handleCanvasPointerDown(e: React.PointerEvent<HTMLCanvasElement>) {
     isPointerOverMapRef.current = true;
-    if (stateRef.current.tool === 'add_road') {
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      // Ignorar si no soporta pointer capture
+    }
+
+    if (stateRef.current.tool === 'add_road' && e.button === 0) {
       roadPaintingRef.current = true;
       const pt = screenToWorld(e.clientX, e.clientY);
       if (pt) {
@@ -816,8 +856,18 @@ export default function App() {
       }
       return;
     }
-    const pt = screenToWorld(e.clientX, e.clientY);
-    if (pt) applyToolAtWorld(pt.x, pt.y);
+
+    if (e.button === 0 || e.button === 1 || e.button === 2) {
+      panDragRef.current = {
+        active: true,
+        button: e.button,
+        startClientX: e.clientX,
+        startClientY: e.clientY,
+        startPanX: cameraRef.current.panX,
+        startPanY: cameraRef.current.panY,
+        moved: false,
+      };
+    }
   }
 
   function handleCanvasPointerMove(e: React.PointerEvent<HTMLCanvasElement>) {
@@ -829,11 +879,78 @@ export default function App() {
         const tile = addRoadTile(s, pt.x, pt.y, s.selectedRoadType, s.selectedRoadLamp);
         if (tile) syncUI();
       }
+      return;
+    }
+
+    if (panDragRef.current.active) {
+      if (e.buttons === 0) {
+        panDragRef.current.active = false;
+        setIsDraggingMap(false);
+        return;
+      }
+      const dx = e.clientX - panDragRef.current.startClientX;
+      const dy = e.clientY - panDragRef.current.startClientY;
+      if (!panDragRef.current.moved && Math.hypot(dx, dy) > 4) {
+        panDragRef.current.moved = true;
+        setIsDraggingMap(true);
+      }
+      if (panDragRef.current.moved) {
+        const canvas = canvasRef.current;
+        if (canvas) {
+          const rect = canvas.getBoundingClientRect();
+          if (rect.width > 0 && rect.height > 0) {
+            const scaleX = CANVAS_WIDTH / rect.width;
+            const scaleY = CANVAS_HEIGHT / rect.height;
+            const clamped = clampPan(
+              panDragRef.current.startPanX + dx * scaleX,
+              panDragRef.current.startPanY + dy * scaleY,
+              cameraRef.current.zoom
+            );
+            cameraRef.current.panX = clamped.panX;
+            cameraRef.current.panY = clamped.panY;
+            syncUI();
+          }
+        }
+      }
     }
   }
 
-  function handleCanvasPointerUp() {
+  function handleCanvasPointerUp(e: React.PointerEvent<HTMLCanvasElement>) {
+    try {
+      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      }
+    } catch {
+      // Ignorar
+    }
+
+    if (roadPaintingRef.current) {
+      roadPaintingRef.current = false;
+      return;
+    }
+
+    if (panDragRef.current.active) {
+      const { moved, button } = panDragRef.current;
+      panDragRef.current.active = false;
+      setIsDraggingMap(false);
+      if (!moved && button === 0) {
+        const pt = screenToWorld(e.clientX, e.clientY);
+        if (pt) applyToolAtWorld(pt.x, pt.y);
+      }
+    }
+  }
+
+  function handleCanvasPointerCancel(e: React.PointerEvent<HTMLCanvasElement>) {
+    try {
+      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      }
+    } catch {
+      // Ignorar
+    }
     roadPaintingRef.current = false;
+    panDragRef.current.active = false;
+    setIsDraggingMap(false);
   }
 
   function handleSetSpeed(speed: 0 | 1 | 2 | 4) {
@@ -1328,13 +1445,19 @@ export default function App() {
               onPointerDown={handleCanvasPointerDown}
               onPointerMove={handleCanvasPointerMove}
               onPointerUp={handleCanvasPointerUp}
+              onPointerCancel={handleCanvasPointerCancel}
+              onContextMenu={(e) => e.preventDefault()}
               onPointerLeave={() => {
                 isPointerOverMapRef.current = false;
                 roadPaintingRef.current = false;
               }}
               data-testid="world-canvas"
               className={`pixel-canvas max-w-full max-h-full aspect-[3/2] rounded-lg touch-none ${
-                state.tool === 'inspect' ? 'cursor-pointer' : 'cursor-crosshair'
+                isDraggingMap
+                  ? 'cursor-grabbing'
+                  : state.tool === 'inspect'
+                    ? 'cursor-grab'
+                    : 'cursor-crosshair'
               }`}
             />
 
@@ -1342,12 +1465,12 @@ export default function App() {
               <span
                 className="text-[11px] font-mono tabular-nums text-slate-200"
                 data-testid="zoom-level"
-                title="Rueda del mouse: Zoom · Flechas con puntero sobre el mapa: Desplazar"
+                title="Rueda del mouse: Zoom · Arrastrar con el mouse o Flechas: Mover el mapa"
               >
                 {Math.round(camera.zoom * 100)}%
               </span>
               <span className="text-[10px] text-slate-400 hidden sm:inline">
-                Rueda: Zoom · Flechas: Mover
+                Rueda: Zoom · Arrastrar/Flechas: Mover
               </span>
               {(camera.zoom !== 1 || camera.panX !== 0 || camera.panY !== 0) && (
                 <button
@@ -1519,6 +1642,14 @@ export default function App() {
                 Representante electo: {petition.representativeName}
               </div>
               <p>{petition.message}</p>
+              {petition.effectSummary && (
+                <div
+                  data-testid="petition-effect-summary"
+                  className="text-[11px] text-emerald-300/90 border-t border-slate-800 pt-1.5"
+                >
+                  {petition.effectSummary}
+                </div>
+              )}
               {petition.isNegative && (
                 <div className="text-[11px] text-amber-300 border-t border-slate-800 pt-1.5">
                   Advertencia de Qwen 2.5: Esta propuesta es riesgosa; escucharla tendría un efecto negativo en el bienestar de la aldea.

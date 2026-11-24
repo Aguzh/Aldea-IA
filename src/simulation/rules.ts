@@ -20,6 +20,7 @@ import type {
   JobType,
   LogEntry,
   MaintenanceStatus,
+  PetitionEffectType,
   QwenAction,
   QwenPolicyState,
   ResourceCostMap,
@@ -2564,7 +2565,8 @@ export function electRepresentative(state: SimulationState): Agent | null {
 
 export function createVillagePetition(
   state: SimulationState,
-  forcedNegative?: boolean
+  forcedNegative?: boolean,
+  forcedEffectType?: PetitionEffectType
 ): VillagePetition | null {
   const rep =
     (state.representativeAgentId !== null
@@ -2574,49 +2576,91 @@ export function createVillagePetition(
 
   const avgHappy =
     state.agents.reduce((acc, a) => acc + a.happiness, 0) / Math.max(1, state.agents.length);
+  const avgCoins =
+    state.agents.reduce((acc, a) => acc + a.coins, 0) / Math.max(1, state.agents.length);
+  const avgFood =
+    (state.agents.reduce((acc, a) => acc + a.inv.food + a.breadCount, 0) +
+      state.houses.reduce((acc, h) => acc + h.storage.food, 0)) /
+    Math.max(1, state.agents.length);
   const sickCount = state.agents.filter((a) => a.isSick).length;
   const homelessCount = state.agents.filter((a) => a.houseId === null).length;
 
   const isNegative =
-    forcedNegative !== undefined
-      ? forcedNegative
-      : Math.random() < (avgHappy < 40 ? 0.35 : 0.22);
+    forcedEffectType === 'negative_overwork' || forcedEffectType === 'negative_ration_cut'
+      ? true
+      : forcedEffectType !== undefined
+        ? false
+        : forcedNegative !== undefined
+          ? forcedNegative
+          : Math.random() < (avgHappy < 40 ? 0.3 : 0.18);
 
-  let kind: VillagePetition['kind'] = 'peticion';
+  let effectType: PetitionEffectType;
+  if (forcedEffectType) {
+    effectType = forcedEffectType;
+  } else if (isNegative) {
+    effectType = state.day % 2 === 0 ? 'negative_overwork' : 'negative_ration_cut';
+  } else if (sickCount > 0) {
+    effectType = 'health_aid';
+  } else if (avgFood < 2) {
+    effectType = 'food_supply';
+  } else if (homelessCount > 0) {
+    effectType = 'housing_materials';
+  } else if (avgCoins < 25 || state.economyReserve.goldReserve < 6 || state.day % 2 === 1) {
+    effectType = 'wealth';
+  } else if (avgHappy < 60) {
+    effectType = 'morale_blessing';
+  } else {
+    effectType = 'knowledge_boost';
+  }
+
+  let kind: VillagePetition['kind'] = isNegative ? 'queja' : 'peticion';
   let title = '';
   let message = '';
+  let effectSummary = '';
 
-  if (isNegative) {
-    kind = 'queja';
-    const negativePrompts = [
-      {
-        title: 'Suprimir descansos nocturnos para producir más',
-        message: `${rep.name} (Qwen 2.5) sugiere exigir trabajo continuo sin descanso nocturno. Esta medida aumentaría el estrés y el agotamiento de los aldeanos.`,
-      },
-      {
-        title: 'Recortar raciones médicas y de alimento',
-        message: `${rep.name} (Qwen 2.5) propone recortar alimentos y medicinas para acumular monedas más rápido, arriesgando la salud del pueblo.`,
-      },
-    ];
-    const picked = negativePrompts[state.day % negativePrompts.length];
-    title = picked.title;
-    message = picked.message;
-  } else if (sickCount > 0) {
-    kind = 'peticion';
-    title = 'Auxilio sanitario y medicinas para enfermos';
-    message = `${rep.name} eleva una súplica a la Intervención Divina: hay ${sickCount} enfermo(s) que necesitan alivio y medicinas en el Hospital.`;
-  } else if (homelessCount > 0) {
-    kind = 'peticion';
-    title = 'Apoyo para refugio y viviendas dignas';
-    message = `${rep.name} solicita aliento divino: ${homelessCount} habitante(s) no tienen casa y no pueden descansar de noche.`;
-  } else if (avgHappy < 55) {
-    kind = 'consulta';
-    title = 'Renovar el ánimo y esperanza de la aldea';
-    message = `${rep.name} consulta a la Intervención Divina para bendecir el ánimo colectivo y dar fuerzas a los oficios.`;
-  } else {
-    kind = 'peticion';
-    title = 'Bendición de prosperidad y evolución';
-    message = `${rep.name} agradece la paz actual y pide inspiración divina para seguir evolucionando en Saber y Concordia.`;
+  switch (effectType) {
+    case 'negative_overwork':
+      title = 'Suprimir descansos nocturnos para producir más';
+      message = `${rep.name} (Qwen 2.5) sugiere exigir trabajo continuo sin descanso nocturno. Esta medida aumentaría el estrés y el agotamiento de los aldeanos.`;
+      effectSummary = 'Si es escuchado: sobrecarga laboral (-20 energía, -14 ánimo, -5 salud). Si no es escuchado: pedido ignorado.';
+      break;
+    case 'negative_ration_cut':
+      title = 'Recortar raciones médicas y de alimento';
+      message = `${rep.name} (Qwen 2.5) propone recortar alimentos y medicinas para acumular monedas más rápido, arriesgando la salud del pueblo.`;
+      effectSummary = 'Si es escuchado: quita comida (-1 ración/aldeano, +15 hambre, -14 ánimo, -5 salud). Si no es escuchado: pedido ignorado.';
+      break;
+    case 'wealth':
+      title = 'Más riqueza, oro y monedas para el pueblo';
+      message = `${rep.name} eleva un pedido de prosperidad para toda AldeaIA: solicita otorgar Oro 🥇, Plata 🥈 y monedas circulantes para impulsar el comercio y bienestar del pueblo.`;
+      effectSummary = 'Si es escuchado: +2 Oro 🥇, +1 Plata 🥈 al respaldo, +6 monedas por aldeano y +15 al fondo de préstamos. Si no es escuchado: pedido ignorado.';
+      break;
+    case 'health_aid':
+      title = 'Auxilio sanitario y medicinas para enfermos';
+      message = `${rep.name} eleva una súplica a la Intervención Divina: hay ${sickCount} enfermo(s) que necesitan alivio, salud y medicinas en la aldea.`;
+      effectSummary = 'Si es escuchado: cura enfermedades curables, +18 salud colectiva y +3 medicinas. Si no es escuchado: pedido ignorado.';
+      break;
+    case 'housing_materials':
+      title = 'Apoyo de materiales para refugio y viviendas';
+      message = `${rep.name} solicita materiales para el pueblo: ${homelessCount} habitante(s) necesitan refugio y las viviendas requieren madera y piedra.`;
+      effectSummary = 'Si es escuchado: entrega +5 Madera y +4 Piedra para obras y refuerza viviendas (+15 durabilidad). Si no es escuchado: pedido ignorado.';
+      break;
+    case 'food_supply':
+      title = 'Abasto urgente de alimentos para el pueblo';
+      message = `${rep.name} pide asistencia alimentaria para toda la aldea ante las bajas reservas de comida.`;
+      effectSummary = 'Si es escuchado: reparte +3 Alimento por aldeano y +4 por vivienda, reduciendo el hambre. Si no es escuchado: pedido ignorado.';
+      break;
+    case 'knowledge_boost':
+      title = 'Impulso de saber y evolución del pueblo';
+      message = `${rep.name} pide sabiduría e inspiración para avanzar de era, desbloquear skills y fortalecer los oficios.`;
+      effectSummary = 'Si es escuchado: +30 Saber global y +6% Saber general para cada adulto. Si no es escuchado: pedido ignorado.';
+      break;
+    case 'morale_blessing':
+    default:
+      kind = 'consulta';
+      title = 'Renovar el ánimo, energía y esperanza de la aldea';
+      message = `${rep.name} consulta a la Intervención Divina para bendecir el ánimo, la salud y la energía colectiva de todos los habitantes.`;
+      effectSummary = 'Si es escuchado: +20 ánimo, +15 energía y +6 salud en toda la aldea. Si no es escuchado: pedido ignorado.';
+      break;
   }
 
   const petition: VillagePetition = {
@@ -2625,6 +2669,8 @@ export function createVillagePetition(
     representativeName: rep.name,
     kind,
     isNegative,
+    effectType,
+    effectSummary,
     title,
     message,
     createdDay: state.day,
@@ -2655,18 +2701,20 @@ export function decidePetitionByQwen(
   if (petition.isNegative) {
     return {
       wasHeard: false,
-      reason: `Qwen 2.5 rechazó "${petition.title}" porque dañaría la salud y estabilidad (ánimo prom. ${Math.round(avgHappy)}%).`,
+      reason: `Qwen 2.5 ignoró "${petition.title}" porque dañaría la salud y estabilidad (ánimo prom. ${Math.round(avgHappy)}%).`,
     };
   }
 
   return {
     wasHeard: true,
     reason:
-      sickCount > 0
-        ? `Qwen 2.5 aprobó "${petition.title}" priorizando atender a ${sickCount} enfermo(s).`
-        : homelessCount > 0
-          ? `Qwen 2.5 aprobó "${petition.title}" para respaldar a ${homelessCount} aldeano(s) sin vivienda.`
-          : `Qwen 2.5 aprobó "${petition.title}" para sostener el progreso y bienestar de la aldea.`,
+      petition.effectType === 'wealth'
+        ? `Qwen 2.5 aprobó "${petition.title}" y otorgó Oro, Plata y monedas a toda la aldea.`
+        : sickCount > 0
+          ? `Qwen 2.5 aprobó "${petition.title}" cumpliendo auxilio sanitario para ${sickCount} enfermo(s).`
+          : homelessCount > 0
+            ? `Qwen 2.5 aprobó "${petition.title}" entregando materiales para respaldar a ${homelessCount} aldeano(s) sin vivienda.`
+            : `Qwen 2.5 aprobó "${petition.title}" y cumplió el pedido en beneficio de toda la aldea.`,
   };
 }
 
@@ -2678,21 +2726,182 @@ export function resolvePetition(
   const petition = state.pendingPetition;
   if (!petition) return 'No había ninguna petición pendiente.';
 
-  // Si la petición es negativa/dañina, escucharla empeora el estado y rechazarla protege a la aldea.
-  const positiveImpact = petition.isNegative ? !wasHeard : wasHeard;
-  const moodDelta = positiveImpact ? 14 : -14;
-  const healthDelta = positiveImpact ? 5 : -4;
+  const effectType: PetitionEffectType =
+    petition.effectType ??
+    (petition.isNegative
+      ? 'negative_overwork'
+      : petition.title.toLowerCase().includes('riquez') || petition.title.toLowerCase().includes('oro')
+        ? 'wealth'
+        : petition.title.toLowerCase().includes('sanitar')
+          ? 'health_aid'
+          : petition.title.toLowerCase().includes('refugio') || petition.title.toLowerCase().includes('viviend')
+            ? 'housing_materials'
+            : petition.title.toLowerCase().includes('alimento')
+              ? 'food_supply'
+              : petition.title.toLowerCase().includes('evoluc') || petition.title.toLowerCase().includes('saber')
+                ? 'knowledge_boost'
+                : 'morale_blessing');
 
-  for (const agent of state.agents) {
-    agent.moodModifier = clamp(agent.moodModifier + moodDelta, -45, 45);
-    agent.happiness = clamp(agent.happiness + moodDelta, 0, 100);
-    agent.health = clamp(agent.health + healthDelta, 1, 100);
-    agent.emotion = deriveAgentEmotion(agent, state.weather);
-    agent.thought = positiveImpact
-      ? responder === 'Qwen 2.5'
-        ? 'Qwen 2.5 respondió con criterio y protegió nuestra aldea.'
-        : 'La Intervención Divina tomó la decisión justa para nuestra aldea.'
-      : 'La decisión tomada afectó el ánimo y bienestar de la aldea.';
+  const positiveImpact = petition.isNegative ? !wasHeard : wasHeard;
+  let fulfillmentDetail = 'Pedido completamente ignorado (sin cambios materiales).';
+
+  if (!wasHeard) {
+    // "No fue Escuchado": el pedido es completamente ignorado, solo afecta ánimo y salud colectiva.
+    const moodDelta = petition.isNegative ? 10 : -8;
+    const healthDelta = petition.isNegative ? 4 : -2;
+    for (const agent of state.agents) {
+      agent.moodModifier = clamp(agent.moodModifier + moodDelta, -45, 45);
+      agent.happiness = clamp(agent.happiness + moodDelta, 0, 100);
+      agent.health = clamp(agent.health + healthDelta, 1, 100);
+      agent.emotion = deriveAgentEmotion(agent, state.weather);
+      agent.thought = petition.isNegative
+        ? 'La propuesta riesgosa fue ignorada y la aldea quedó protegida.'
+        : 'Nuestro pedido no fue escuchado y fue ignorado.';
+    }
+  } else {
+    // "Fue Escuchado": Qwen 2.5 cumple el pedido sobre toda la AldeaIA además de impactar ánimo y salud.
+    const moodDelta = petition.isNegative ? -14 : effectType === 'morale_blessing' ? 20 : 14;
+    const healthDelta = petition.isNegative ? -5 : effectType === 'health_aid' ? 18 : 5;
+
+    switch (effectType) {
+      case 'wealth': {
+        addPreciousMetalToReserve(state, 'gold', 2);
+        addPreciousMetalToReserve(state, 'silver', 1);
+        const bank = state.specialBuildings.find((b) => b.type === 'bank');
+        if (bank) {
+          bank.storage.gold += 2;
+          bank.storage.silver += 1;
+        }
+        const perVillager = 6;
+        let totalMinted = 15;
+        state.economyReserve.bankLoanPool += 15;
+        for (const agent of state.agents) {
+          agent.coins += perVillager;
+          totalMinted += perVillager;
+          agent.lastQwenDecision = 'Pedido cumplido: recibió +6 monedas y respaldo en Oro para el pueblo.';
+        }
+        state.economyReserve.mintedCoins += totalMinted;
+        state.economyReserve.backedCoinsCapacity = Math.max(
+          state.economyReserve.backedCoinsCapacity,
+          state.economyReserve.mintedCoins
+        );
+        if (!state.resourcesPaused) {
+          for (let i = 0; i < 2; i++) {
+            state.resources.push({
+              id: state.nextId++,
+              type: 'gold',
+              x: MOUNTAIN_MIN_X + 36 + Math.random() * (CANVAS_WIDTH - MOUNTAIN_MIN_X - 72),
+              y: SAFE_LAND_MIN_Y + 24 + Math.random() * (CANVAS_HEIGHT - SAFE_LAND_MIN_Y - 60),
+              amount: 6,
+              maxAmount: 6,
+              depleted: false,
+              restTimer: 0,
+            });
+          }
+        }
+        recalculateEconomyReserve(state);
+        fulfillmentDetail = `Cumplido: +2 Oro 🥇, +1 Plata 🥈 al respaldo, +15 fondo de préstamos y +${perVillager} monedas por aldeano.`;
+        break;
+      }
+      case 'health_aid': {
+        let cured = 0;
+        for (const agent of state.agents) {
+          if (agent.isSick && !agent.illness?.incurable) {
+            agent.isSick = false;
+            agent.illness = null;
+            agent.illnessName = null;
+            cured++;
+          }
+        }
+        const medBuilding = state.specialBuildings.find(
+          (b) => b.type === 'infirmary' || b.type === 'apothecary'
+        );
+        if (medBuilding) medBuilding.storage.medicine += 3;
+        fulfillmentDetail = `Cumplido: ${cured} enfermo(s) curados, +18 salud en toda la aldea y +3 medicinas.`;
+        break;
+      }
+      case 'housing_materials': {
+        const builder =
+          state.agents.find((a) => !a.isChild && a.job === 'Constructor') ??
+          state.agents.find((a) => a.id === petition.representativeId) ??
+          state.agents[0];
+        const depot = state.specialBuildings.find((b) => b.type === 'general_depot' && b.isOperational);
+        if (depot) {
+          depot.storage.wood += 5;
+          depot.storage.stone += 4;
+        } else if (builder) {
+          builder.inv.wood += 5;
+          builder.inv.stone += 4;
+        }
+        for (const h of state.houses) {
+          h.durability = clamp(h.durability + 15, 0, 100);
+          if (h.maintenanceStatus === 'debt_warning') h.maintenanceStatus = 'ok';
+        }
+        fulfillmentDetail = 'Cumplido: +5 Madera, +4 Piedra para obras y refuerzo de viviendas (+15 durabilidad).';
+        break;
+      }
+      case 'food_supply': {
+        for (const agent of state.agents) {
+          agent.inv.food += 3;
+          agent.hunger = clamp(agent.hunger - 25, 0, 100);
+          agent.energy = clamp(agent.energy + 10, 0, 100);
+        }
+        for (const h of state.houses) {
+          h.storage.food += 4;
+        }
+        fulfillmentDetail = 'Cumplido: +3 Alimento/aldeano, +4 Alimento/vivienda y alivio del hambre.';
+        break;
+      }
+      case 'knowledge_boost': {
+        state.knowledge += 30;
+        for (const agent of state.agents) {
+          if (!agent.isChild) {
+            agent.education = clamp(agent.education + 6, 0, 100);
+            syncAgentSkills(agent);
+          }
+        }
+        state.era = computeEra(state.knowledge, state.houses);
+        fulfillmentDetail = 'Cumplido: +30 Saber global y +6% Saber general por adulto.';
+        break;
+      }
+      case 'morale_blessing': {
+        for (const agent of state.agents) {
+          agent.energy = clamp(agent.energy + 15, 0, 100);
+        }
+        fulfillmentDetail = 'Cumplido: +20 ánimo, +15 energía y +6 salud colectiva.';
+        break;
+      }
+      case 'negative_overwork': {
+        for (const agent of state.agents) {
+          agent.energy = clamp(agent.energy - 20, 0, 100);
+        }
+        fulfillmentDetail = 'Aplicado: sobrecarga laboral sin descanso (-20 energía, -14 ánimo, -5 salud).';
+        break;
+      }
+      case 'negative_ration_cut': {
+        for (const agent of state.agents) {
+          if (agent.inv.food > 0) {
+            agent.inv.food -= 1;
+            agent.coins += 2;
+          }
+          agent.hunger = clamp(agent.hunger + 15, 0, 100);
+        }
+        fulfillmentDetail = 'Aplicado: recorte de raciones (+15 hambre, -14 ánimo, -5 salud).';
+        break;
+      }
+    }
+
+    for (const agent of state.agents) {
+      agent.moodModifier = clamp(agent.moodModifier + moodDelta, -45, 45);
+      agent.happiness = clamp(agent.happiness + moodDelta, 0, 100);
+      agent.health = clamp(agent.health + healthDelta, 1, 100);
+      agent.emotion = deriveAgentEmotion(agent, state.weather);
+      agent.thought = positiveImpact
+        ? responder === 'Qwen 2.5'
+          ? `Qwen 2.5 cumplió "${petition.title}" en toda la aldea.`
+          : `El pedido "${petition.title}" fue escuchado y cumplido en la aldea.`
+        : 'La medida aplicada perjudicó el bienestar de la aldea.';
+    }
   }
 
   state.pendingPetition = null;
@@ -2704,10 +2913,8 @@ export function resolvePetition(
 
   const label = wasHeard ? 'Fue Escuchado' : 'No fue Escuchado';
   const prefix = responder === 'Qwen 2.5' ? 'Qwen 2.5 (Qwen Responde)' : 'Intervención Divina';
-  const msg = `${prefix} (${label} · "${petition.title}"): impacto ${
-    positiveImpact ? 'positivo' : 'negativo'
-  } en ánimo y salud.`;
-  addLog(state, msg, positiveImpact ? 'emerald' : 'rose');
+  const msg = `${prefix} (${label} · "${petition.title}"): ${fulfillmentDetail}`;
+  addLog(state, msg, positiveImpact ? 'emerald' : wasHeard ? 'rose' : 'amber');
   return msg;
 }
 
@@ -4620,18 +4827,427 @@ export function createAnimal(
   return animal;
 }
 
+function normalizeDirectiveText(text: string): string {
+  return text
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+}
+
+const JOB_MATCH_PATTERNS: Array<{ keywords: string[]; job: JobType }> = [
+  { keywords: ['alcalde', 'ayuntamiento'], job: 'Alcalde' },
+  { keywords: ['comisario', 'policia', 'carcel'], job: 'Comisario' },
+  { keywords: ['almacenero', 'deposito'], job: 'Almacenero' },
+  { keywords: ['panader'], job: 'Panadero' },
+  { keywords: ['herrer', 'forj'], job: 'Herrero' },
+  { keywords: ['carpinter'], job: 'Carpintero' },
+  { keywords: ['banquer', 'banco'], job: 'Banquero' },
+  { keywords: ['maestr'], job: 'Maestro' },
+  { keywords: ['artesan'], job: 'Artesano' },
+  { keywords: ['guardi'], job: 'Guardián' },
+  { keywords: ['botic', 'farmac'], job: 'Boticario' },
+  { keywords: ['pescador', 'pesca', 'muelle'], job: 'Pescador' },
+  { keywords: ['comerc', 'mercad'], job: 'Comerciante' },
+  { keywords: ['curander', 'medic', 'hospital', 'enfermer'], job: 'Curandero' },
+  { keywords: ['constructor', 'construir'], job: 'Constructor' },
+  { keywords: ['erudit', 'investig'], job: 'Erudito' },
+  { keywords: ['agricultor', 'granj'], job: 'Agricultor' },
+  { keywords: ['miner'], job: 'Minero' },
+  { keywords: ['lenador'], job: 'Leñador' },
+  { keywords: ['recolector'], job: 'Recolector' },
+  { keywords: ['aprendiz'], job: 'Aprendiz' },
+];
+
+interface WorkerRoleQueryTarget {
+  keywords: string[];
+  label: string;
+  jobs: JobType[];
+  buildingType?: SpecialBuildingType;
+  skillId?: string;
+  skillLabel?: string;
+}
+
+const WORKER_ROLE_QUERY_TARGETS: WorkerRoleQueryTarget[] = [
+  {
+    keywords: ['panader'],
+    label: 'Panadería',
+    jobs: ['Panadero'],
+    buildingType: 'bakery',
+    skillId: 'comercio_justo',
+    skillLabel: 'Comercio Justo (32%+ Saber)',
+  },
+  {
+    keywords: ['herrer', 'forja'],
+    label: 'Herrería / Forja',
+    jobs: ['Herrero', 'Artesano'],
+    buildingType: 'forge',
+    skillId: 'forja_herramientas',
+    skillLabel: 'Fabricación de Herramientas (36%+ Saber)',
+  },
+  {
+    keywords: ['carpinter'],
+    label: 'Carpintería',
+    jobs: ['Carpintero'],
+    buildingType: 'carpentry',
+    skillId: 'carpinteria_pino',
+    skillLabel: 'Corte y Venta en Pino (12%+ Saber)',
+  },
+  {
+    keywords: ['botic', 'farmac'],
+    label: 'Botica',
+    jobs: ['Boticario'],
+    buildingType: 'apothecary',
+    skillId: 'alquimia_botica',
+    skillLabel: 'Botánica y Remedios (52%+ Saber)',
+  },
+  {
+    keywords: ['hospital', 'enfermer', 'curander', 'clinic'],
+    label: 'Hospital',
+    jobs: ['Curandero'],
+    buildingType: 'infirmary',
+    skillId: 'primeros_auxilios',
+    skillLabel: 'Primeros Auxilios (16%+ Saber)',
+  },
+  {
+    keywords: ['escuel', 'maestr', 'academia'],
+    label: 'Escuela',
+    jobs: ['Maestro', 'Erudito'],
+    buildingType: 'school',
+  },
+  {
+    keywords: ['banco', 'banquer'],
+    label: 'Banco Central',
+    jobs: ['Banquero'],
+    buildingType: 'bank',
+    skillId: 'banca_metalica',
+    skillLabel: 'Banca y Respaldo Metálico (56%+ Saber)',
+  },
+  {
+    keywords: ['mercad', 'comerc'],
+    label: 'Mercado Central',
+    jobs: ['Comerciante'],
+    buildingType: 'market',
+    skillId: 'comercio_justo',
+    skillLabel: 'Comercio Justo (32%+ Saber)',
+  },
+  {
+    keywords: ['muelle', 'pescador', 'pesca'],
+    label: 'Muelle Fluvial',
+    jobs: ['Pescador'],
+    buildingType: 'dock',
+    skillId: 'pesca_fluvial',
+    skillLabel: 'Pesca Fluvial (20%+ Saber)',
+  },
+  {
+    keywords: ['deposito', 'almacen'],
+    label: 'Depósito General',
+    jobs: ['Almacenero'],
+    buildingType: 'general_depot',
+  },
+  {
+    keywords: ['ayuntamiento', 'alcalde'],
+    label: 'Ayuntamiento',
+    jobs: ['Alcalde'],
+    buildingType: 'town_hall',
+    skillId: 'legislacion_civica',
+    skillLabel: 'Legislación y Orden Público (92%+ Saber)',
+  },
+  {
+    keywords: ['comisaria', 'policia', 'comisario', 'guardia'],
+    label: 'Comisaría',
+    jobs: ['Comisario', 'Guardián'],
+    buildingType: 'police_station',
+    skillId: 'legislacion_civica',
+    skillLabel: 'Legislación y Orden Público (92%+ Saber)',
+  },
+  {
+    keywords: ['carcel', 'prision'],
+    label: 'Cárcel',
+    jobs: ['Comisario', 'Guardián'],
+    buildingType: 'prison',
+  },
+  { keywords: ['constructor'], label: 'Constructor', jobs: ['Constructor'], skillId: 'albanileria', skillLabel: 'Albañilería Básica (28%+ Saber)' },
+  { keywords: ['miner'], label: 'Minero', jobs: ['Minero'], skillId: 'mineria_cobre', skillLabel: 'Minería de Cobre (8%+ Saber)' },
+  { keywords: ['lenador'], label: 'Leñador', jobs: ['Leñador'], skillId: 'recoleccion', skillLabel: 'Recolección Eficaz (4%+ Saber)' },
+  { keywords: ['agricultor', 'granj', 'cultiv'], label: 'Agricultor', jobs: ['Agricultor'], skillId: 'siembra_avanzada', skillLabel: 'Siembra Avanzada (44%+ Saber)' },
+  { keywords: ['erudit'], label: 'Erudito', jobs: ['Erudito'] },
+  { keywords: ['artesan'], label: 'Artesano', jobs: ['Artesano'], skillId: 'forja_herramientas', skillLabel: 'Fabricación de Herramientas (36%+ Saber)' },
+  { keywords: ['recolector'], label: 'Recolector', jobs: ['Recolector'] },
+];
+
+export function computePossibleWorkersReport(
+  state: SimulationState,
+  target: WorkerRoleQueryTarget
+): {
+  totalEligible: number;
+  freeOperators: number;
+  alreadyInJob: number;
+  withSkill: number;
+  builtCount: number;
+  maxCount: number | null;
+  eligibleNames: string[];
+  freeNames: string[];
+  currentNames: string[];
+  summaryText: string;
+} {
+  const eligible = state.agents.filter((a) => !a.isChild && a.ageYears >= 15 && a.jailedDays <= 0);
+  const free = eligible.filter((a) => a.assignedBuildingId === null);
+  const current = eligible.filter((a) => target.jobs.includes(a.job));
+  const skilled = target.skillId
+    ? eligible.filter((a) => a.skills.includes(target.skillId!))
+    : eligible;
+  const builtCount = target.buildingType
+    ? state.specialBuildings.filter((b) => b.type === target.buildingType).length
+    : 0;
+  const maxCount = target.buildingType ? SPECIAL_BUILDING_COSTS[target.buildingType].maxCount : null;
+
+  const namesList = (arr: Agent[]) => (arr.length > 0 ? arr.map((a) => a.name).join(', ') : 'ninguno');
+  const parts: string[] = [
+    `Posibles trabajadores para ${target.label} (${target.jobs.join('/')}):`,
+    `Total de posibles trabajadores adultos (≥15 años, libres): ${eligible.length} [${namesList(eligible)}].`,
+    `Disponibles inmediatos sin otro edificio asignado: ${free.length} [${namesList(free)}].`,
+    `Ya ejercen ese oficio: ${current.length} [${namesList(current)}].`,
+  ];
+  if (target.skillId && target.skillLabel) {
+    parts.push(`Con skill ${target.skillLabel}: ${skilled.length}.`);
+  }
+  if (target.buildingType && maxCount !== null) {
+    parts.push(`Edificios construidos: ${builtCount}/${maxCount}.`);
+  }
+
+  return {
+    totalEligible: eligible.length,
+    freeOperators: free.length,
+    alreadyInJob: current.length,
+    withSkill: skilled.length,
+    builtCount,
+    maxCount,
+    eligibleNames: eligible.map((a) => a.name),
+    freeNames: free.map((a) => a.name),
+    currentNames: current.map((a) => a.name),
+    summaryText: parts.join(' '),
+  };
+}
+
+export function buildQwenVillageTelemetry(state: SimulationState): Record<string, unknown> {
+  const jobCounts = getAllJobsMap();
+  for (const a of state.agents) jobCounts[a.job]++;
+  const activeJobs = Object.fromEntries(Object.entries(jobCounts).filter(([, v]) => v > 0));
+  const eligibleAdults = state.agents.filter((a) => !a.isChild && a.ageYears >= 15 && a.jailedDays <= 0);
+  const freeOperators = eligibleAdults.filter((a) => a.assignedBuildingId === null);
+
+  const possibleWorkersByBuilding: Record<string, { totalAptos: number; libresSinEdificio: number; actuales: number; construidos: string }> = {};
+  for (const t of WORKER_ROLE_QUERY_TARGETS) {
+    if (!t.buildingType) continue;
+    const rep = computePossibleWorkersReport(state, t);
+    possibleWorkersByBuilding[t.label] = {
+      totalAptos: rep.totalEligible,
+      libresSinEdificio: rep.freeOperators,
+      actuales: rep.alreadyInJob,
+      construidos: `${rep.builtCount}/${rep.maxCount}`,
+    };
+  }
+
+  const depot = state.specialBuildings.find((b) => b.type === 'general_depot');
+  const sumAgents = (key: keyof ResourceInventory) =>
+    state.agents.reduce((acc, a) => acc + (a.inv[key] ?? 0), 0);
+  const totalResources = {
+    comida: sumAgents('food') + state.houses.reduce((acc, h) => acc + h.storage.food, 0) + (depot?.storage.food ?? 0),
+    madera: sumAgents('wood') + (depot?.storage.wood ?? 0),
+    pino: sumAgents('pineWood') + (depot?.storage.pineWood ?? 0),
+    arce: sumAgents('mapleWood') + (depot?.storage.mapleWood ?? 0),
+    roble: sumAgents('oakWood') + (depot?.storage.oakWood ?? 0),
+    piedra: sumAgents('stone') + (depot?.storage.stone ?? 0),
+    cobre: sumAgents('copper') + (depot?.storage.copper ?? 0),
+    hierro: sumAgents('iron') + (depot?.storage.iron ?? 0),
+    plata: sumAgents('silver') + (depot?.storage.silver ?? 0) + state.economyReserve.silverReserve,
+    oro: sumAgents('gold') + (depot?.storage.gold ?? 0) + state.economyReserve.goldReserve,
+    monedasTotales: getTotalCirculatingCoins(state),
+    pecesRio: `${state.riverFishStock}/${state.riverFishMaxStock}`,
+  };
+
+  return {
+    dia: state.day,
+    estacion: state.season,
+    clima: state.weather,
+    bioma: state.biome,
+    era: ERA_METADATA[state.era].label,
+    poblacionTotal: state.agents.length,
+    adultosAptosTrabajo: eligibleAdults.length,
+    adultosLibresSinEdificio: freeOperators.length,
+    ninos: state.agents.filter((a) => a.isChild).length,
+    enfermos: state.agents.filter((a) => a.isSick).length,
+    sinCasa: state.agents.filter((a) => a.houseId === null).length,
+    encarcelados: state.agents.filter((a) => a.jailedDays > 0).length,
+    oficiosActuales: activeJobs,
+    posiblesTrabajadoresPorEdificio: possibleWorkersByBuilding,
+    recursosTotales: totalResources,
+    casas: state.houses.length,
+    plazaConstruida: Boolean(state.plaza),
+    puenteConstruido: Boolean(state.bridge),
+    edificiosEspeciales: state.specialBuildings.map((b) => `${b.name}(N${b.level},${b.isOperational ? 'op' : 'inop'})`),
+    cultivos: state.farms.length,
+    animales: state.animals.length,
+    leyesActivas: state.laws.filter((l) => l.active).map((l) => l.name),
+    reservaEconomica: state.economyReserve,
+    conocimiento: Math.round(state.knowledge),
+    aldeanos: state.agents.map((a) => `${a.name}(${a.job},${a.ageYears}a,saber:${Math.round(a.education)}%)`),
+  };
+}
+
+export function queryVillageData(
+  state: SimulationState,
+  promptText: string
+): { matched: boolean; reply: string; details: string[] } {
+  const q = normalizeDirectiveText(promptText);
+  const isMutationVerb =
+    /\b(cambia|cambiar|cambie|cambien|reasign|construy|construi|construir|crea|crear|mejora|mejorar|sube|subir|baja|bajar|agrega|agregar|agregale|dales|otorga|regala|elimina|borra|mata|matar|cura|curar|enferma|deroga|quita|activa|desactiva|prohibe|prohibir|impone|imponer|libera|liberar|repara|reparar|despacha|siembra|planta|enciende|apaga|pausa|reanuda)\b/.test(
+      q
+    );
+  const isQuestionOrDataRequest =
+    /\b(cuanto|cuanta|cuantos|cuantas|cual|cuales|quien|quienes|posibles?|cantidad|total|dime|decime|cuentame|muestrame|lista|resumen|informe|reporte|estadisticas|estado de|datos|disponibles?|candidatos?|aptos?|capacidad|tienen|hay)\b/.test(
+      q
+    ) || q.includes('?');
+
+  // Evitar confundir "dame la cantidad/datos/resumen" con una orden de regalar ítems
+  const pureDataRequest = isQuestionOrDataRequest && (!isMutationVerb || /\bdame\s+(?:la|el|los|las|un|una)\s+(?:cantidad|total|datos?|lista|resumen|informe|reporte|estado|info)/.test(q));
+  if (!pureDataRequest) {
+    return { matched: false, reply: '', details: [] };
+  }
+
+  // 1. Consulta específica de posibles trabajadores / operarios para edificio u oficio
+  if (
+    q.includes('trabajador') ||
+    q.includes('operario') ||
+    q.includes('empleado') ||
+    q.includes('pueden trabajar') ||
+    q.includes('pueden ser') ||
+    q.includes('posibles') ||
+    q.includes('candidato') ||
+    q.includes('apto')
+  ) {
+    const target = WORKER_ROLE_QUERY_TARGETS.find((t) => t.keywords.some((kw) => q.includes(kw)));
+    if (target) {
+      const rep = computePossibleWorkersReport(state, target);
+      return {
+        matched: true,
+        reply: rep.summaryText,
+        details: [
+          `Consulta: ${target.label}`,
+          `Total aptos: ${rep.totalEligible} · Libres: ${rep.freeOperators} · Actuales: ${rep.alreadyInJob}`,
+        ],
+      };
+    }
+    const eligible = state.agents.filter((a) => !a.isChild && a.ageYears >= 15 && a.jailedDays <= 0);
+    const free = eligible.filter((a) => a.assignedBuildingId === null);
+    return {
+      matched: true,
+      reply: `Datos de Aldea IA: hay ${eligible.length} trabajadores adultos aptos (≥15 años, no encarcelados) de ${state.agents.length} habitantes totales; ${free.length} están libres sin edificio especial asignado.`,
+      details: [`Aptos: ${eligible.length}/${state.agents.length} · Libres: ${free.length}`],
+    };
+  }
+
+  // 2. Consulta sobre un aldeano específico por nombre
+  const namedAgent = state.agents.find((a) => {
+    const first = normalizeDirectiveText(a.name.split(' ')[0]);
+    return first.length >= 3 && q.includes(first);
+  });
+  if (namedAgent) {
+    const reply = `${namedAgent.name}: ${namedAgent.ageYears} años, oficio ${namedAgent.job}, salud ${Math.round(
+      namedAgent.health
+    )}%, ánimo ${Math.round(namedAgent.happiness)}%, saber general ${Math.round(
+      namedAgent.education
+    )}% (${namedAgent.skills.length}/25 skills), monedas ${namedAgent.coins}, inventario [comida:${namedAgent.inv.food}, madera:${
+      namedAgent.inv.wood + namedAgent.inv.pineWood + namedAgent.inv.mapleWood + namedAgent.inv.oakWood
+    }, piedra:${namedAgent.inv.stone}, minerales:${
+      namedAgent.inv.copper + namedAgent.inv.iron + namedAgent.inv.silver + namedAgent.inv.gold
+    }], actividad: ${namedAgent.activity}.`;
+    return { matched: true, reply, details: [`Datos de ${namedAgent.name}`] };
+  }
+
+  // 3. Consulta de oficios / población
+  if (q.includes('oficio') || q.includes('trabajo') || q.includes('poblador') || q.includes('aldeano') || q.includes('habitant') || q.includes('poblacion')) {
+    const counts = getAllJobsMap();
+    for (const a of state.agents) counts[a.job]++;
+    const breakdown = Object.entries(counts)
+      .filter(([, n]) => n > 0)
+      .map(([j, n]) => `${j}: ${n}`)
+      .join(', ');
+    const adults = state.agents.filter((a) => !a.isChild && a.ageYears >= 15).length;
+    const kids = state.agents.filter((a) => a.isChild).length;
+    const sick = state.agents.filter((a) => a.isSick).length;
+    const homeless = state.agents.filter((a) => a.houseId === null).length;
+    return {
+      matched: true,
+      reply: `Datos de población (${state.agents.length} habitantes · ${adults} adultos ≥15a · ${kids} niños · ${sick} enfermos · ${homeless} sin casa). Distribución de oficios: ${breakdown}.`,
+      details: [`Población: ${state.agents.length}`, `Oficios activos: ${breakdown}`],
+    };
+  }
+
+  // 4. Consulta de recursos / riqueza / economía
+  if (
+    q.includes('recurso') ||
+    q.includes('oro') ||
+    q.includes('plata') ||
+    q.includes('moneda') ||
+    q.includes('madera') ||
+    q.includes('piedra') ||
+    q.includes('comida') ||
+    q.includes('alimento') ||
+    q.includes('riquez') ||
+    q.includes('riques') ||
+    q.includes('peces') ||
+    q.includes('economia')
+  ) {
+    const tel = buildQwenVillageTelemetry(state);
+    const res = tel.recursosTotales as Record<string, string | number>;
+    return {
+      matched: true,
+      reply: `Recursos y economía de Aldea IA: Comida ${res.comida}, Madera común ${res.madera} (Pino ${res.pino}, Arce ${res.arce}, Roble ${res.roble}), Piedra ${res.piedra}, Cobre ${res.cobre}, Hierro ${res.hierro}, Plata ${res.plata}, Oro ${res.oro}, Monedas totales ${res.monedasTotales} (tope respaldo ${state.economyReserve.backedCoinsCapacity}), Peces en río ${res.pecesRio}.`,
+      details: ['Consulta de recursos y reservas'],
+    };
+  }
+
+  // 5. Consulta general / edificios / resumen
+  const buildingsText =
+    state.specialBuildings.length > 0
+      ? state.specialBuildings.map((b) => `${b.name} N${b.level} (${b.isOperational ? 'operativo' : 'inoperativo'})`).join(', ')
+      : 'ninguno todavía';
+  return {
+    matched: true,
+    reply: `Estado de Aldea IA (Día ${state.day}, ${state.season}, ${ERA_METADATA[state.era].label}): ${state.agents.length} habitantes, ${state.houses.length} viviendas, Plaza: ${
+      state.plaza ? 'Sí' : 'No'
+    }, Puente: ${state.bridge ? (isBridgePassable(state) ? 'Operativo' : 'Bloqueado') : 'No'}, Edificios: ${buildingsText}, Saber global: ${Math.round(
+      state.knowledge
+    )}, Monedas: ${getTotalCirculatingCoins(state)}/${state.economyReserve.backedCoinsCapacity}.`,
+    details: ['Resumen completo de Aldea IA'],
+  };
+}
+
 export function interpretQwenDirective(
   promptText: string,
-  agentNames: string[] = []
+  agentNames: string[] = [],
+  state?: SimulationState
 ): {
   reply: string;
   actions: QwenAction[];
 } {
-  const q = promptText.toLowerCase();
+  if (state) {
+    const queryResult = queryVillageData(state, promptText);
+    if (queryResult.matched) {
+      return {
+        reply: queryResult.reply,
+        actions: [{ type: 'REPORT_DATA', answer: queryResult.reply }],
+      };
+    }
+  }
+
+  const qRaw = promptText.toLowerCase();
+  const q = normalizeDirectiveText(promptText);
   const actions: QwenAction[] = [];
   const summaryParts: string[] = [];
 
-  const numMatch = q.match(/\b([1-6])\b/);
+  const numMatch = q.match(/\b([1-9]\d?)\b/);
   const requestedCount = numMatch ? Number(numMatch[1]) : 1;
 
   const matchedName = agentNames.find((fullName) => {
@@ -4639,33 +5255,33 @@ export function interpretQwenDirective(
     const escapedFull = fullName.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const fullRe = new RegExp(`(?:^|[^a-záéíóúüñ])${escapedFull}(?:$|[^a-záéíóúüñ])`, 'i');
     const firstRe = new RegExp(`(?:^|[^a-záéíóúüñ])${first}(?:$|[^a-záéíóúüñ])`, 'i');
-    return first.length >= 3 && (fullRe.test(q) || firstRe.test(q));
+    return first.length >= 3 && (fullRe.test(qRaw) || firstRe.test(qRaw));
   });
-  if (matchedName) {
-    let job: JobType | undefined;
-    if (q.includes('alcalde') || q.includes('ayuntamiento')) job = 'Alcalde';
-    else if (q.includes('comisario') || q.includes('policia') || q.includes('cárcel')) job = 'Comisario';
-    else if (q.includes('almacenero') || q.includes('depósito') || q.includes('deposito')) job = 'Almacenero';
-    else if (q.includes('panader')) job = 'Panadero';
-    else if (q.includes('herrer') || q.includes('forj')) job = 'Herrero';
-    else if (q.includes('carpinter')) job = 'Carpintero';
-    else if (q.includes('banquer') || q.includes('banco')) job = 'Banquero';
-    else if (q.includes('maestr')) job = 'Maestro';
-    else if (q.includes('artesan')) job = 'Artesano';
-    else if (q.includes('guardi')) job = 'Guardián';
-    else if (q.includes('botic')) job = 'Boticario';
-    else if (q.includes('pescador') || q.includes('pesc') || q.includes('muelle')) job = 'Pescador';
-    else if (q.includes('comerc') || q.includes('mercad')) job = 'Comerciante';
-    else if (q.includes('curander') || q.includes('medic') || q.includes('hospital')) job = 'Curandero';
-    else if (q.includes('constructor') || q.includes('constru')) job = 'Constructor';
-    else if (q.includes('erudit') || q.includes('escuel') || q.includes('investig')) job = 'Erudito';
-    else if (q.includes('agricultor') || q.includes('cultiv')) job = 'Agricultor';
-    else if (q.includes('miner')) job = 'Minero';
-    else if (q.includes('leñador') || q.includes('mader')) job = 'Leñador';
 
+  const detectJobInText = (textNorm: string): JobType | undefined => {
+    for (const entry of JOB_MATCH_PATTERNS) {
+      if (entry.keywords.some((kw) => textNorm.includes(kw))) {
+        return entry.job;
+      }
+    }
+    return undefined;
+  };
+
+  // Detección explícita de cambio de trabajo masivo / fraccional / numérico (ej. "cambia el trabajo de la mitad de los pobladores")
+  const isMassJobChange =
+    !matchedName &&
+    (/\b(cambia[a-z]*|reasign[a-z]*|pon(?:ga|gan|er)?|asign[a-z]*|conviert[a-z]*|convert[a-z]*|pas[ae][a-z]*|dej[ae][a-z]*|rot[ae][a-z]*|haz|hagan)\b/.test(
+      q
+    ) &&
+      /\b(trabajos?|oficios?|ocupacion(?:es)?|puestos?|profesion(?:es)?|rol(?:es)?|poblador(?:es)?|aldean[oa]?s?|habitantes?|trabajador(?:es)?|personas?|todos|todas|mitad|tercio|cuarto)\b/.test(
+        q
+      ));
+
+  if (matchedName && !isMassJobChange) {
+    const job = detectJobInText(q);
     let action: NonNullable<Extract<QwenAction, { type: 'DIRECT_VILLAGER' }>['action']> | undefined;
     if (q.includes('pareja') || q.includes('divor') || q.includes('separar')) action = 'switch_partner';
-    else if (q.includes('guardar') || q.includes('baúl') || q.includes('baul') || q.includes('casa')) action = 'store_home';
+    else if (q.includes('guardar') || q.includes('baul') || q.includes('casa')) action = 'store_home';
     else if (q.includes('pesc')) action = 'fish';
     else if (q.includes('curar') || q.includes('sanar')) action = 'heal';
     else if (q.includes('constru')) action = 'build';
@@ -4676,7 +5292,160 @@ export function interpretQwenDirective(
     summaryParts.push(`directiva individual de Qwen 2.5 para ${matchedName}`);
   }
 
-  if (q.includes('préstamo') || q.includes('prestamo') || q.includes('crédito') || q.includes('credito')) {
+  if (isMassJobChange) {
+    let fraction: number | undefined;
+    let count: number | undefined;
+    const pctMatch = q.match(/(\d{1,3})\s*%/);
+    if (pctMatch) {
+      fraction = clamp(Number(pctMatch[1]) / 100, 0.05, 1);
+    } else if (q.includes('mitad') || q.includes('medio') || q.includes('media')) {
+      fraction = 0.5;
+    } else if (q.includes('tercio')) {
+      fraction = 0.34;
+    } else if (q.includes('cuarto')) {
+      fraction = 0.25;
+    } else if (/\b(todos|todas|toda la aldea|todos los|entera)\b/.test(q)) {
+      fraction = 1;
+    } else {
+      const explicitCountMatch = q.match(
+        /\b(\d{1,3})\s*(?:de\s+(?:los|las)\s+)?(?:aldean|poblador|habitant|persona|trabajador)/
+      );
+      if (explicitCountMatch) {
+        count = Math.max(1, Number(explicitCountMatch[1]));
+      }
+    }
+
+    let fromJob: JobType | undefined;
+    let preferredJob: JobType | undefined;
+    const fromToMatch = q.match(/\b(?:de|los)\s+([a-z\s]+?)\s+(?:a|como|en)\s+([a-z\s]+)$/);
+    if (fromToMatch) {
+      const leftJob = detectJobInText(fromToMatch[1]);
+      const rightJob = detectJobInText(fromToMatch[2]);
+      if (leftJob && rightJob && leftJob !== rightJob) {
+        fromJob = leftJob;
+        preferredJob = rightJob;
+      }
+    }
+    if (!preferredJob) {
+      const targetMatch = q.match(/\b(?:a|como|en|para)\s+([a-z\s]{3,})$/);
+      if (targetMatch) preferredJob = detectJobInText(targetMatch[1]);
+    }
+    if (!preferredJob && !q.includes('trabajo') && !q.includes('oficio')) {
+      preferredJob = detectJobInText(q);
+    }
+
+    actions.push({
+      type: 'ASSIGN_ACTIVE_JOBS',
+      preferredJob,
+      count,
+      fraction,
+      fromJob,
+      forceChange: true,
+    });
+    actions.push({ type: 'SET_POLICIES', patch: { workFocus: true } });
+    summaryParts.push(
+      preferredJob
+        ? `cambio de oficio a ${preferredJob}`
+        : fraction === 0.5
+          ? 'cambio de oficio para la mitad de los pobladores'
+          : 'reasignación real de oficios'
+    );
+  }
+
+  // Control climático / estación / bioma
+  if (/\b(clima|lluvia|llover|tormenta electrica|sequia|soleado|estacion|invierno|verano|otono|primavera|bioma)\b/.test(q)) {
+    let weather: WeatherType | undefined;
+    let biome: BiomeType | undefined;
+    let season: SeasonType | undefined;
+    if (q.includes('tormenta electrica') || q.includes('rayo')) weather = 'thunderstorm';
+    else if (q.includes('tormenta')) weather = 'storm';
+    else if (q.includes('lluvia') || q.includes('llover')) weather = 'rain';
+    else if (q.includes('sequia')) weather = 'drought';
+    else if (q.includes('soleado') || q.includes('sol')) weather = 'sunny';
+
+    if (q.includes('invierno') || q.includes('tundra') || q.includes('nieve')) {
+      season = 'Invierno';
+      biome = 'tundra';
+    } else if (q.includes('verano') || q.includes('arido') || q.includes('desierto')) {
+      season = 'Verano';
+      biome = 'arid';
+    } else if (q.includes('otono')) {
+      season = 'Otoño';
+      biome = 'forest';
+    } else if (q.includes('primavera') || q.includes('pradera')) {
+      season = 'Primavera';
+      biome = 'grassland';
+    }
+    if (weather || biome || season) {
+      actions.push({ type: 'SET_WEATHER_BIOME', weather, biome, season });
+      summaryParts.push('control de clima/estación');
+    }
+  }
+
+  // Otorgar oro, riqueza, monedas o materiales directamente cuando el jugador lo ordena
+  if (
+    !isMassJobChange &&
+    /\b(agrega|agregar|agregale|dales|da|otorga|regala|anade|anadir|suma|sumar|mas)\b/.test(q) &&
+    /\b(riquez|riques|oro|plata|monedas?|madera|piedra|comida|alimento|hierro|cobre|herramientas?|medicinas?)\b/.test(q) &&
+    !q.includes('prohibir')
+  ) {
+    const qtyMatch = q.match(/\b(\d{1,3})\b/);
+    const amt = qtyMatch ? clamp(Number(qtyMatch[1]), 1, 200) : 10;
+    if (q.includes('riquez') || q.includes('riques') || q.includes('oro')) {
+      actions.push({ type: 'GRANT_VILLAGER_ITEMS', resource: 'gold', amount: qtyMatch ? amt : 2, targetName: matchedName });
+      actions.push({ type: 'GRANT_VILLAGER_ITEMS', resource: 'coins', amount: qtyMatch ? amt : 10, targetName: matchedName });
+      summaryParts.push('entrega de riqueza, oro y monedas');
+    } else if (q.includes('plata')) {
+      actions.push({ type: 'GRANT_VILLAGER_ITEMS', resource: 'silver', amount: qtyMatch ? amt : 2, targetName: matchedName });
+      summaryParts.push('entrega de Plata');
+    } else if (q.includes('moneda')) {
+      actions.push({ type: 'GRANT_VILLAGER_ITEMS', resource: 'coins', amount: amt, targetName: matchedName });
+      summaryParts.push(`+${amt} monedas`);
+    } else if (q.includes('comida') || q.includes('alimento')) {
+      actions.push({ type: 'GRANT_VILLAGER_ITEMS', resource: 'food', amount: qtyMatch ? amt : 5, targetName: matchedName });
+      summaryParts.push('entrega de alimentos');
+    } else if (q.includes('madera')) {
+      actions.push({ type: 'GRANT_VILLAGER_ITEMS', resource: 'wood', amount: qtyMatch ? amt : 8, targetName: matchedName });
+      summaryParts.push('entrega de madera');
+    } else if (q.includes('piedra')) {
+      actions.push({ type: 'GRANT_VILLAGER_ITEMS', resource: 'stone', amount: qtyMatch ? amt : 8, targetName: matchedName });
+      summaryParts.push('entrega de piedra');
+    } else if (q.includes('hierro')) {
+      actions.push({ type: 'GRANT_VILLAGER_ITEMS', resource: 'iron', amount: qtyMatch ? amt : 4, targetName: matchedName });
+      summaryParts.push('entrega de hierro');
+    } else if (q.includes('cobre')) {
+      actions.push({ type: 'GRANT_VILLAGER_ITEMS', resource: 'copper', amount: qtyMatch ? amt : 4, targetName: matchedName });
+      summaryParts.push('entrega de cobre');
+    } else if (q.includes('medicin')) {
+      actions.push({ type: 'GRANT_VILLAGER_ITEMS', resource: 'medicine', amount: qtyMatch ? amt : 2, targetName: matchedName });
+      summaryParts.push('entrega de medicinas');
+    } else if (q.includes('herramienta')) {
+      actions.push({ type: 'GRANT_VILLAGER_ITEMS', resource: 'tools', amount: qtyMatch ? amt : 1, targetName: matchedName });
+      summaryParts.push('entrega de herramientas');
+    }
+  }
+
+  // Liberar presos
+  if (q.includes('libera') && (q.includes('preso') || q.includes('carcel') || q.includes('detenid') || matchedName)) {
+    actions.push({ type: 'RELEASE_PRISONERS', targetName: matchedName });
+    summaryParts.push('liberación de detenidos');
+  }
+
+  // Ajuste directo de energía / salud / saber
+  if (/\b(sube|subir|aumenta|baja|bajar|reduce|quita)\b/.test(q) && /\b(energia|salud|vida|saber|conocimiento)\b/.test(q)) {
+    const isDown = /\b(baja|bajar|reduce|quita)\b/.test(q);
+    const val = isDown ? -20 : 25;
+    if (q.includes('energia')) {
+      actions.push({ type: 'ADJUST_STAT', stat: 'energy', delta: val, targetName: matchedName });
+      summaryParts.push(`${isDown ? 'reducción' : 'aumento'} de energía`);
+    }
+    if (q.includes('salud') || q.includes('vida')) {
+      actions.push({ type: 'ADJUST_STAT', stat: 'health', delta: val, targetName: matchedName });
+      summaryParts.push(`${isDown ? 'reducción' : 'aumento'} de salud`);
+    }
+  }
+
+  if (qRaw.includes('préstamo') || q.includes('prestamo') || qRaw.includes('crédito') || q.includes('credito')) {
     actions.push({ type: 'ISSUE_BANK_LOANS' });
     summaryParts.push('préstamos bancarios para obras');
   }
@@ -4700,23 +5469,36 @@ export function interpretQwenDirective(
     actions.push({ type: 'TRIGGER_FIRE' });
     summaryParts.push('incendio');
   }
-  if (q.includes('prohibir pesca')) {
-    actions.push({ type: 'TOGGLE_LAW', lawId: 'ban_fishing', active: true });
-    summaryParts.push('ley de veda de pesca');
+  const isRepeal = /\b(deroga|quita|levanta|anula|desactiva|permitir)\b/.test(q);
+  if (q.includes('prohibir pesca') || q.includes('veda fluvial')) {
+    actions.push({ type: 'TOGGLE_LAW', lawId: 'ban_fishing', active: !isRepeal });
+    summaryParts.push(isRepeal ? 'derogación veda de pesca' : 'ley de veda de pesca');
   }
-  if (q.includes('prohibir madera') || q.includes('prohibir comercio de madera')) {
-    actions.push({ type: 'TOGGLE_LAW', lawId: 'ban_trade_wood', active: true });
-    summaryParts.push('ley de veda forestal');
+  if (q.includes('prohibir madera') || q.includes('prohibir comercio de madera') || q.includes('veda forestal')) {
+    actions.push({ type: 'TOGGLE_LAW', lawId: 'ban_trade_wood', active: !isRepeal });
+    summaryParts.push(isRepeal ? 'derogación veda forestal' : 'ley de veda forestal');
   }
-  if (q.includes('prohibir oro') || q.includes('prohibir minería')) {
-    actions.push({ type: 'TOGGLE_LAW', lawId: 'ban_mine_gold', active: true });
-    summaryParts.push('moratoria de minería de Oro');
+  if (q.includes('prohibir oro') || q.includes('moratoria aurifera')) {
+    actions.push({ type: 'TOGGLE_LAW', lawId: 'ban_mine_gold', active: !isRepeal });
+    summaryParts.push(isRepeal ? 'derogación moratoria de Oro' : 'moratoria de minería de Oro');
   }
-  if (q.includes('prohibir pan')) {
-    actions.push({ type: 'TOGGLE_LAW', lawId: 'ban_trade_bread', active: true });
-    summaryParts.push('prohibición de venta de pan');
+  if (q.includes('prohibir pan') || q.includes('reserva alimentaria')) {
+    actions.push({ type: 'TOGGLE_LAW', lawId: 'ban_trade_bread', active: !isRepeal });
+    summaryParts.push(isRepeal ? 'derogación reserva alimentaria' : 'prohibición de venta de pan');
   }
-  if (q.includes('representante') || q.includes('elección')) {
+  if (q.includes('racionamiento invernal')) {
+    actions.push({ type: 'TOGGLE_LAW', lawId: 'winter_rationing', active: !isRepeal });
+    summaryParts.push(isRepeal ? 'derogación racionamiento invernal' : 'ley de racionamiento invernal');
+  }
+  if (q.includes('guardia nocturna')) {
+    actions.push({ type: 'TOGGLE_LAW', lawId: 'night_watch', active: !isRepeal });
+    summaryParts.push(isRepeal ? 'derogación guardia nocturna' : 'ley de guardia nocturna');
+  }
+  if (q.includes('prioridad minera')) {
+    actions.push({ type: 'TOGGLE_LAW', lawId: 'mining_priority', active: !isRepeal });
+    summaryParts.push(isRepeal ? 'derogación prioridad minera' : 'ley de prioridad minera');
+  }
+  if (q.includes('representante') || q.includes('eleccion')) {
     actions.push({ type: 'ELECT_REPRESENTATIVE' });
     summaryParts.push('elección de representante');
   }
@@ -4725,15 +5507,15 @@ export function interpretQwenDirective(
     actions.push({ type: 'BUILD_SPECIAL', buildingType: 'town_hall' });
     summaryParts.push('construcción de Ayuntamiento');
   }
-  if (q.includes('comisaria') || q.includes('comisaría')) {
+  if (q.includes('comisaria')) {
     actions.push({ type: 'BUILD_SPECIAL', buildingType: 'police_station' });
     summaryParts.push('construcción de Comisaría');
   }
-  if (q.includes('carcel') || q.includes('cárcel')) {
+  if (q.includes('carcel')) {
     actions.push({ type: 'BUILD_SPECIAL', buildingType: 'prison' });
     summaryParts.push('construcción de Cárcel');
   }
-  if (q.includes('deposito') || q.includes('depósito')) {
+  if (q.includes('deposito')) {
     actions.push({ type: 'BUILD_SPECIAL', buildingType: 'general_depot' });
     summaryParts.push('construcción de Depósito General');
   }
@@ -4764,12 +5546,12 @@ export function interpretQwenDirective(
     summaryParts.push('trazado de caminos con recursos reales');
   }
 
-  if (q.includes('muelle') || (q.includes('pesc') && !q.includes('prohibir'))) {
+  if (q.includes('muelle') || (q.includes('pesc') && !q.includes('prohibir') && !isMassJobChange)) {
     actions.push({ type: 'BUILD_SPECIAL', buildingType: 'dock' });
     summaryParts.push('construcción de Muelle Fluvial');
   }
 
-  if (!matchedName && (q.includes('banco') || q.includes('respaldo')) && !q.includes('préstamo') && !q.includes('prestamo')) {
+  if (!matchedName && !isMassJobChange && (q.includes('banco') || q.includes('respaldo')) && !q.includes('prestamo')) {
     actions.push({ type: 'BUILD_SPECIAL', buildingType: 'bank' });
     summaryParts.push('construcción de Banco Central');
   }
@@ -4787,23 +5569,18 @@ export function interpretQwenDirective(
     summaryParts.push(isNorth ? 'parcelas agrícolas en Zona Norte' : 'creación de parcelas agrícolas');
   }
 
-  if (q.includes('econom') || q.includes('comerc') || q.includes('mercad') || q.includes('moneda') || q.includes('negocio')) {
+  if (q.includes('econom') || q.includes('comerc') || q.includes('mercad') || q.includes('negocio')) {
     actions.push({ type: 'GENERATE_ECONOMY' });
     summaryParts.push('activación de economía respaldada y comercios');
   }
 
   if (
-    q.includes('permitir más aldeano') ||
     q.includes('permitir mas aldeano') ||
-    q.includes('más aldeano') ||
     q.includes('mas aldeano') ||
-    q.includes('más habitante') ||
     q.includes('mas habitante') ||
-    q.includes('crecer población') ||
     q.includes('crecer poblacion') ||
     q.includes('nuevos aldeano') ||
     q.includes('sumar aldeano') ||
-    q.includes('tener más hijo') ||
     q.includes('tener mas hijo')
   ) {
     const spawnMatch = q.match(/(?:sumar|agregar|traer|nuevos?|invitar)\s*(\d+)/);
@@ -4812,7 +5589,7 @@ export function interpretQwenDirective(
     summaryParts.push(`expansión poblacional (+${spawnCount} colonos)`);
   }
 
-  if (q.includes('enfermer') || q.includes('hospital') || q.includes('clínica')) {
+  if (q.includes('enfermer') || q.includes('hospital') || q.includes('clinica')) {
     actions.push({ type: 'BUILD_SPECIAL', buildingType: 'infirmary' });
     summaryParts.push('construcción de Hospital');
   }
@@ -4820,19 +5597,19 @@ export function interpretQwenDirective(
     actions.push({ type: 'BUILD_SPECIAL', buildingType: 'school' });
     summaryParts.push('construcción de Escuela');
   }
-  if (q.includes('panader')) {
+  if (!isMassJobChange && q.includes('panader')) {
     actions.push({ type: 'BUILD_SPECIAL', buildingType: 'bakery' });
     summaryParts.push('construcción de Panadería');
   }
-  if (!matchedName && q.includes('carpinter')) {
+  if (!matchedName && !isMassJobChange && q.includes('carpinter')) {
     actions.push({ type: 'BUILD_SPECIAL', buildingType: 'carpentry' });
     summaryParts.push('construcción de Carpintería');
   }
-  if (q.includes('botic') || q.includes('farmac')) {
+  if (!isMassJobChange && (q.includes('botic') || q.includes('farmac'))) {
     actions.push({ type: 'BUILD_SPECIAL', buildingType: 'apothecary' });
     summaryParts.push('construcción de Botica');
   }
-  if (q.includes('forja') || q.includes('herrer')) {
+  if (!isMassJobChange && (q.includes('forja') || q.includes('herrer'))) {
     actions.push({ type: 'BUILD_SPECIAL', buildingType: 'forge' });
     summaryParts.push('construcción de Herrería / Forja');
   }
@@ -4885,7 +5662,7 @@ export function interpretQwenDirective(
     actions.push({ type: 'BUILD_PLAZA' });
     summaryParts.push('construcción de Plaza decidida por Qwen');
   }
-  if (q.includes('puente') || q.includes('cruzar el río') || q.includes('cruzar el rio')) {
+  if (q.includes('puente') || q.includes('cruzar el rio')) {
     actions.push({ type: 'BUILD_BRIDGE' });
     summaryParts.push('construcción de Puente sobre el río');
   }
@@ -4897,6 +5674,7 @@ export function interpretQwenDirective(
     expandNorthMatch ||
     (isNorth && !q.includes('cultiv')) ||
     (q.includes('constru') &&
+      !isMassJobChange &&
       !q.includes('plaza') &&
       !q.includes('puente') &&
       !q.includes('banco') &&
@@ -4912,11 +5690,8 @@ export function interpretQwenDirective(
       !q.includes('muelle') &&
       !q.includes('ayuntamiento') &&
       !q.includes('comisaria') &&
-      !q.includes('comisaría') &&
       !q.includes('carcel') &&
-      !q.includes('cárcel') &&
       !q.includes('deposito') &&
-      !q.includes('depósito') &&
       !q.includes('camino'))
   ) {
     const rawCount = houseMatch?.[1] ?? expandNorthMatch?.[1];
@@ -4941,12 +5716,9 @@ export function interpretQwenDirective(
       ['enfermer', 'infirmary'],
       ['escuela', 'school'],
       ['deposito', 'general_depot'],
-      ['depósito', 'general_depot'],
       ['ayuntamiento', 'town_hall'],
       ['comisaria', 'police_station'],
-      ['comisaría', 'police_station'],
       ['carcel', 'prison'],
-      ['cárcel', 'prison'],
     ];
     const specialUpgrade = specialUpgradeMap.find(([kw]) => q.includes(kw));
     if (specialUpgrade) {
@@ -4960,27 +5732,9 @@ export function interpretQwenDirective(
     }
   }
 
-  if (!matchedName && (q.includes('trabajo') || q.includes('activo') || q.includes('oficio') || q.includes('productiv'))) {
-    let preferredJob: JobType | undefined;
-    if (q.includes('constructor')) preferredJob = 'Constructor';
-    else if (q.includes('minero')) preferredJob = 'Minero';
-    else if (q.includes('carpinter')) preferredJob = 'Carpintero';
-    else if (q.includes('banquer')) preferredJob = 'Banquero';
-    else if (q.includes('maestr')) preferredJob = 'Maestro';
-    else if (q.includes('artesan')) preferredJob = 'Artesano';
-    else if (q.includes('guardi')) preferredJob = 'Guardián';
-    else if (q.includes('comerciante')) preferredJob = 'Comerciante';
-    else if (q.includes('curandero')) preferredJob = 'Curandero';
-    else if (q.includes('erudito')) preferredJob = 'Erudito';
-    else if (q.includes('agricultor')) preferredJob = 'Agricultor';
-    else if (q.includes('pescador')) preferredJob = 'Pescador';
-    else if (q.includes('panadero')) preferredJob = 'Panadero';
-    else if (q.includes('herrero')) preferredJob = 'Herrero';
-    else if (q.includes('boticario')) preferredJob = 'Boticario';
-    else if (q.includes('alcalde')) preferredJob = 'Alcalde';
-    else if (q.includes('comisario')) preferredJob = 'Comisario';
-    else if (q.includes('almacenero')) preferredJob = 'Almacenero';
-    actions.push({ type: 'ASSIGN_ACTIVE_JOBS', preferredJob });
+  if (!matchedName && !isMassJobChange && (q.includes('trabajo') || q.includes('activo') || q.includes('oficio') || q.includes('productiv'))) {
+    const preferredJob = detectJobInText(q);
+    actions.push({ type: 'ASSIGN_ACTIVE_JOBS', preferredJob, forceChange: Boolean(preferredJob) });
     actions.push({ type: 'SET_POLICIES', patch: { workFocus: true } });
     summaryParts.push(preferredJob ? `asignación al oficio ${preferredJob}` : 'asignación activa de oficios');
   }
@@ -4991,7 +5745,7 @@ export function interpretQwenDirective(
     summaryParts.push('impulso a la evolución de la especie y la aldea');
   }
 
-  if (!matchedName && (q.includes('curar') || q.includes('salud') || q.includes('sanar'))) {
+  if (!matchedName && (q.includes('curar') || q.includes('sanar'))) {
     actions.push({ type: 'HEAL_VILLAGERS' });
     actions.push({ type: 'SET_POLICIES', patch: { healthPriority: true } });
     summaryParts.push('curación y prioridad sanitaria');
@@ -4999,7 +5753,6 @@ export function interpretQwenDirective(
 
   if (
     q.includes('felic') ||
-    q.includes('ánimo') ||
     q.includes('animo') ||
     q.includes('excit') ||
     q.includes('depre') ||
@@ -5576,20 +6329,214 @@ export function applyQwenActions(
         break;
       }
       case 'ASSIGN_ACTIVE_JOBS': {
-        for (const agent of state.agents) {
-          const nextJob =
-            action.preferredJob && !agent.isChild
-              ? action.preferredJob
-              : assignBalancedJob(agent, state.agents, state.houses, state.policies, state.specialBuildings);
-          setAgentJob(state, agent, nextJob, 'organización Qwen 2.5');
+        const allEligible = state.agents.filter(
+          (a) => !a.isChild && a.ageYears >= 15 && a.jailedDays <= 0
+        );
+        const poolBase =
+          allEligible.length > 0 ? allEligible : state.agents.filter((a) => !a.isChild);
+        const filteredPool = action.fromJob
+          ? poolBase.filter((a) => a.job === action.fromJob)
+          : poolBase;
+
+        const targetCount =
+          typeof action.fraction === 'number'
+            ? clamp(Math.round(filteredPool.length * action.fraction), 1, filteredPool.length)
+            : typeof action.count === 'number'
+              ? clamp(Math.round(action.count), 1, filteredPool.length)
+              : filteredPool.length;
+
+        const orderedPool = action.preferredJob
+          ? [...filteredPool].sort(
+              (a, b) =>
+                Number(a.job === action.preferredJob) - Number(b.job === action.preferredJob)
+            )
+          : filteredPool;
+        const selected = orderedPool.slice(0, targetCount);
+
+        const jobCounts = getAllJobsMap();
+        for (const ag of state.agents) jobCounts[ag.job]++;
+        const rotationJobs: JobType[] = [
+          'Constructor',
+          'Minero',
+          'Leñador',
+          'Agricultor',
+          'Carpintero',
+          'Pescador',
+          'Comerciante',
+          'Erudito',
+          'Panadero',
+          'Herrero',
+          'Curandero',
+          'Boticario',
+          'Artesano',
+          'Guardián',
+          'Banquero',
+          'Almacenero',
+        ];
+
+        const changedDetails: string[] = [];
+        for (const agent of selected) {
+          const oldJob = agent.job;
+          let nextJob: JobType;
+          if (action.preferredJob) {
+            nextJob = action.preferredJob;
+          } else if (action.forceChange) {
+            const balanced = assignBalancedJob(
+              agent,
+              state.agents,
+              state.houses,
+              state.policies,
+              state.specialBuildings
+            );
+            if (balanced !== oldJob) {
+              nextJob = balanced;
+            } else {
+              const sortedDistinct = rotationJobs
+                .filter((j) => j !== oldJob)
+                .sort((a, b) => jobCounts[a] - jobCounts[b]);
+              nextJob = sortedDistinct[0] ?? (oldJob === 'Constructor' ? 'Minero' : 'Constructor');
+            }
+          } else {
+            nextJob = assignBalancedJob(
+              agent,
+              state.agents,
+              state.houses,
+              state.policies,
+              state.specialBuildings
+            );
+          }
+
+          if (nextJob !== oldJob) {
+            jobCounts[oldJob] = Math.max(0, jobCounts[oldJob] - 1);
+            jobCounts[nextJob] = (jobCounts[nextJob] ?? 0) + 1;
+            setAgentJob(state, agent, nextJob, 'organización Qwen 2.5');
+            changedDetails.push(`${agent.name} (${oldJob}→${nextJob})`);
+          }
           agent.taskTimer = 0;
           agent.lastQwenDecision = `Qwen 2.5 asignó oficio ${agent.job}.`;
           agent.qwenPlan = `Ejercer ${agent.job}`;
-          agent.thought = `Asumí el oficio de ${agent.job} para evolucionar la aldea.`;
+          agent.thought = `Asumí el oficio de ${agent.job} por orden de Qwen 2.5.`;
         }
         syncSpecialBuildingStaff(state);
-        executed.push(action.preferredJob ? `Oficio ${action.preferredJob} asignado` : 'Oficios activos reasignados');
-        addLog(state, 'Qwen 2.5 organizó los oficios activos en los aldeanos.', 'violet');
+        const summary =
+          changedDetails.length > 0
+            ? `Cambiados ${changedDetails.length}/${state.agents.length}: ${changedDetails.slice(0, 6).join(', ')}${changedDetails.length > 6 ? '...' : ''}`
+            : action.preferredJob
+              ? `Oficio ${action.preferredJob} verificado`
+              : 'Oficios activos verificados';
+        executed.push(summary);
+        addLog(state, `Qwen 2.5 ejecutó cambio de oficios — ${summary}.`, 'violet');
+        break;
+      }
+      case 'SET_WEATHER_BIOME': {
+        if (action.season) {
+          state.season = action.season;
+          const autoEnv = getSeasonBiomeAndWeather(action.season);
+          state.biome = action.biome ?? autoEnv.biome;
+          state.weather = action.weather ?? autoEnv.weather;
+        } else {
+          if (action.biome) state.biome = action.biome;
+          if (action.weather) state.weather = action.weather;
+        }
+        const envDesc = `${state.season} · clima ${state.weather}`;
+        executed.push(`Entorno cambiado a ${envDesc}`);
+        addLog(state, `Qwen 2.5 cambió el entorno a ${envDesc}.`, 'sky');
+        break;
+      }
+      case 'GRANT_VILLAGER_ITEMS': {
+        const amount = Math.max(1, Math.round(action.amount));
+        if (action.resource === 'gold' || action.resource === 'silver') {
+          addPreciousMetalToReserve(state, action.resource, amount);
+          const bank = state.specialBuildings.find((b) => b.type === 'bank');
+          if (bank) bank.storage[action.resource] += amount;
+          if (!state.resourcesPaused) {
+            state.resources.push({
+              id: state.nextId++,
+              type: action.resource,
+              x: MOUNTAIN_MIN_X + 36 + Math.random() * (CANVAS_WIDTH - MOUNTAIN_MIN_X - 72),
+              y: SAFE_LAND_MIN_Y + 24 + Math.random() * (CANVAS_HEIGHT - SAFE_LAND_MIN_Y - 60),
+              amount: 6,
+              maxAmount: 6,
+              depleted: false,
+              restTimer: 0,
+            });
+          }
+          executed.push(`+${amount} ${action.resource === 'gold' ? 'Oro 🥇' : 'Plata 🥈'} al respaldo`);
+          addLog(state, `Qwen 2.5 otorgó +${amount} ${action.resource === 'gold' ? 'Oro 🥇' : 'Plata 🥈'} a la aldea.`, 'amber');
+          break;
+        }
+        const targets = action.targetName
+          ? state.agents.filter((a) =>
+              a.name.toLowerCase().startsWith(action.targetName!.split(' ')[0].toLowerCase())
+            )
+          : state.agents;
+        for (const ag of targets) {
+          if (action.resource === 'coins') {
+            ag.coins += amount;
+            state.economyReserve.mintedCoins += amount;
+          } else if (action.resource === 'bread') {
+            ag.breadCount += amount;
+          } else if (action.resource === 'tools') {
+            ag.toolsCount += amount;
+          } else if (action.resource === 'medicine') {
+            ag.medicineCount += amount;
+          } else {
+            ag.inv[action.resource] += amount;
+          }
+        }
+        if (action.resource === 'coins') {
+          state.economyReserve.backedCoinsCapacity = Math.max(
+            state.economyReserve.backedCoinsCapacity,
+            state.economyReserve.mintedCoins
+          );
+          recalculateEconomyReserve(state);
+        }
+        executed.push(`+${amount} ${action.resource} a ${targets.length} aldeano(s)`);
+        addLog(state, `Qwen 2.5 entregó +${amount} ${action.resource} a ${targets.length} aldeano(s).`, 'emerald');
+        break;
+      }
+      case 'ADJUST_STAT': {
+        const targets = action.targetName
+          ? state.agents.filter((a) =>
+              a.name.toLowerCase().startsWith(action.targetName!.split(' ')[0].toLowerCase())
+            )
+          : state.agents;
+        if (action.stat === 'knowledge') {
+          state.knowledge = Math.max(0, state.knowledge + action.delta);
+        } else {
+          for (const ag of targets) {
+            if (action.stat === 'health') ag.health = clamp(ag.health + action.delta, 1, 100);
+            if (action.stat === 'energy') ag.energy = clamp(ag.energy + action.delta, 0, 100);
+            if (action.stat === 'happiness') {
+              ag.moodModifier = clamp(ag.moodModifier + action.delta, -45, 45);
+              ag.happiness = clamp(ag.happiness + action.delta, 0, 100);
+              ag.emotion = deriveAgentEmotion(ag, state.weather);
+            }
+          }
+        }
+        executed.push(`${action.stat} ${action.delta >= 0 ? '+' : ''}${action.delta}`);
+        addLog(state, `Qwen 2.5 ajustó ${action.stat} (${action.delta >= 0 ? '+' : ''}${action.delta}).`, 'sky');
+        break;
+      }
+      case 'RELEASE_PRISONERS': {
+        let released = 0;
+        for (const ag of state.agents) {
+          if (
+            ag.jailedDays > 0 &&
+            (!action.targetName ||
+              ag.name.toLowerCase().startsWith(action.targetName.split(' ')[0].toLowerCase()))
+          ) {
+            ag.jailedDays = 0;
+            ag.thought = 'Fui liberado por orden de Qwen 2.5.';
+            released++;
+          }
+        }
+        executed.push(released > 0 ? `${released} detenido(s) liberado(s)` : 'Sin detenidos en cárcel');
+        if (released > 0) addLog(state, `Qwen 2.5 liberó a ${released} detenido(s) de la cárcel.`, 'emerald');
+        break;
+      }
+      case 'REPORT_DATA': {
+        executed.push('Datos consultados en tiempo real');
         break;
       }
       case 'BOOST_EVOLUTION': {

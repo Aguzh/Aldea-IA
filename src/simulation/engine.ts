@@ -8,6 +8,7 @@ import {
   assignBalancedJob,
   assignMentorships,
   BRIDGE_HALF_WIDTH,
+  buildQwenVillageTelemetry,
   canAgentRest,
   canAgentsReproduce,
   cancelActiveConstruction,
@@ -64,6 +65,7 @@ import {
   pickQwenBabyName,
   PREGNANCY_DAYS,
   PRODUCTION_INPUT_COSTS,
+  queryVillageData,
   recalculateEconomyReserve,
   recordDailySnapshot,
   recordResourceOperation,
@@ -97,6 +99,7 @@ import type {
   BiomeType,
   FarmPlot,
   House,
+  MaintenanceStatus,
   QwenAction,
   ResourceCostMap,
   ResourceInventory,
@@ -112,6 +115,29 @@ export interface CameraView {
   zoom: number;
   panX: number;
   panY: number;
+}
+
+export function pushFloatingEffect(
+  state: SimulationState,
+  x: number,
+  y: number,
+  text: string,
+  color = '#f8fafc',
+  durationSec = 2.2
+): void {
+  if (!Array.isArray(state.floatingEffects)) state.floatingEffects = [];
+  state.floatingEffects.push({
+    id: state.nextId++,
+    x: x + (Math.random() - 0.5) * 10,
+    y: y - 12,
+    text,
+    color,
+    ttl: durationSec,
+    maxTtl: durationSec,
+  });
+  if (state.floatingEffects.length > 24) {
+    state.floatingEffects = state.floatingEffects.slice(-24);
+  }
 }
 
 const BIOMES: Record<BiomeType, { bg: string; patch: string; name: string }> = {
@@ -369,6 +395,7 @@ export function createInitialState(): SimulationState {
     },
     logs: [],
     resourceLedger: [],
+    floatingEffects: [],
     qwenMessages: [
       {
         id: 1,
@@ -1285,6 +1312,14 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
     state.lightningFlashTimer = Math.max(0, state.lightningFlashTimer - dt * 0.25);
   }
 
+  if (Array.isArray(state.floatingEffects) && state.floatingEffects.length > 0) {
+    for (const fx of state.floatingEffects) {
+      fx.ttl -= elapsedSeconds;
+      fx.y -= elapsedSeconds * 11;
+    }
+    state.floatingEffects = state.floatingEffects.filter((fx) => fx.ttl > 0);
+  }
+
   // Regeneración de nodos finitos tras descansar sin sobreexplotación
   for (const r of state.resources) {
     if (r.depleted) {
@@ -1623,7 +1658,10 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
         const ty = damagedSpecial ? damagedSpecial.y : damagedHouse ? damagedHouse.y : agent.y;
         const dist = moveTowards(agent, tx, ty, moveSpeed, dt, currentBridgeX);
         if (dist <= 26 && agent.taskTimer <= 6) {
-          repairDamagedStructures(state, agent);
+          const repCount = repairDamagedStructures(state, agent);
+          if (repCount > 0) {
+            pushFloatingEffect(state, agent.x, agent.y - 10, '🔧 Reparado', '#38bdf8');
+          }
           agent.taskTimer = 0;
         }
         break;
@@ -1776,6 +1814,7 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
             );
           }
           agent.inv.food += myDock ? 2 : 1;
+          pushFloatingEffect(state, agent.x, agent.y - 10, myDock ? '+2 🐟' : '+1 🐟', '#38bdf8');
           const dockBonus = myDock ? Math.max(2, Math.round(4 / getCompetingBuildingCount(state, 'dock'))) : 1;
           agent.coins += mintBackedCoins(state, dockBonus);
           advanceJobMastery(agent, 'Pescador', 3);
@@ -1797,14 +1836,17 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
             target.milkReady = 0;
             agent.milkCount += 2;
             agent.coins += mintBackedCoins(state, 3);
+            pushFloatingEffect(state, agent.x, agent.y - 10, '+2 🥛', '#f8fafc');
             addLog(state, `${agent.name} ordeñó a ${target.name} (+2 leche).`, 'emerald');
           } else if (target.type === 'sheep' && target.woolReady >= 50) {
             target.woolReady = 0;
             agent.coins += mintBackedCoins(state, 4);
             agent.moodModifier = clamp(agent.moodModifier + 4, -45, 45);
+            pushFloatingEffect(state, agent.x, agent.y - 10, '+4 💰', '#facc15');
           } else if (target.type === 'chicken') {
             agent.inv.food += 1;
             agent.coins += mintBackedCoins(state, 1);
+            pushFloatingEffect(state, agent.x, agent.y - 10, '+1 🥚', '#fde68a');
           }
           advanceJobMastery(agent, 'Agricultor', 2);
           agent.taskTimer = 0;
@@ -1834,30 +1876,39 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
           target.amount = Math.max(0, target.amount - 1);
           if (target.type === 'coins') {
             agent.coins += mintBackedCoins(state, 5 * bonusYield);
+            pushFloatingEffect(state, agent.x, agent.y - 10, `+${5 * bonusYield} 💰`, '#facc15');
           } else if (target.type === 'pine_wood') {
             agent.inv.pineWood += bonusYield;
             agent.carpentryKnowledge = clamp(agent.carpentryKnowledge + 2, 0, 100);
+            pushFloatingEffect(state, agent.x, agent.y - 10, `+${bonusYield} 🌲`, '#86efac');
           } else if (target.type === 'maple_wood') {
             agent.inv.mapleWood += bonusYield;
             agent.carpentryKnowledge = clamp(agent.carpentryKnowledge + 3, 0, 100);
+            pushFloatingEffect(state, agent.x, agent.y - 10, `+${bonusYield} 🪵`, '#fdba74');
           } else if (target.type === 'oak_wood') {
             agent.inv.oakWood += bonusYield;
             agent.carpentryKnowledge = clamp(agent.carpentryKnowledge + 4, 0, 100);
+            pushFloatingEffect(state, agent.x, agent.y - 10, `+${bonusYield} 🌳`, '#fbbf24');
           } else if (target.type === 'copper') {
             agent.inv.copper += bonusYield;
             agent.coins += mintBackedCoins(state, forge ? 4 : 2);
+            pushFloatingEffect(state, agent.x, agent.y - 10, `+${bonusYield} 🟠`, '#fb923c');
           } else if (target.type === 'gold') {
             agent.inv.gold += bonusYield;
             recalculateEconomyReserve(state);
             agent.coins += mintBackedCoins(state, hasBank ? 8 : 5);
+            pushFloatingEffect(state, agent.x, agent.y - 10, `+${bonusYield} 🥇`, '#facc15');
             addLog(state, `${agent.name} extrajo Oro 🥇 de la montaña (+${bonusYield}).`, 'amber');
           } else if (target.type === 'silver') {
             agent.inv.silver += bonusYield;
             recalculateEconomyReserve(state);
             agent.coins += mintBackedCoins(state, hasBank ? 5 : 3);
+            pushFloatingEffect(state, agent.x, agent.y - 10, `+${bonusYield} 🥈`, '#e2e8f0');
           } else {
             agent.inv[target.type] += bonusYield;
             agent.coins += mintBackedCoins(state, target.type === 'iron' ? (forge ? 5 : 3) : 1);
+            const icon = target.type === 'food' ? '🍎' : target.type === 'wood' ? '🪵' : '🪨';
+            pushFloatingEffect(state, agent.x, agent.y - 10, `+${bonusYield} ${icon}`, '#cbd5e1');
           }
 
           if (target.type === 'wood' && agent.job === 'Carpintero') {
@@ -1894,6 +1945,7 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
             agent.coins += mintBackedCoins(state, 2);
             advanceJobMastery(agent, 'Agricultor', 3);
             state.knowledge += 2;
+            pushFloatingEffect(state, plot.x, plot.y - 10, `+${harvestBonus} 🌾`, '#facc15');
             addLog(state, `${agent.name} cosechó ${plot.cropName} (+${harvestBonus} raciones).`, 'emerald');
             agent.taskTimer = 0;
           } else {
@@ -1924,7 +1976,11 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
         if (dist <= 44) {
           ac.elapsed = clamp(ac.elapsed + dt * workMult, 0, ac.totalDuration);
           if (ac.elapsed >= ac.totalDuration) {
-            completeActiveConstruction(state, agent);
+            const doneX = ac.x;
+            const doneY = ac.y;
+            if (completeActiveConstruction(state, agent)) {
+              pushFloatingEffect(state, doneX, doneY - 14, '🏠 Obra lista', '#4ade80');
+            }
             agent.taskTimer = 0;
           }
         }
@@ -2054,6 +2110,7 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
                 }
                 agent.breadCount += 2;
                 agent.coins += mintBackedCoins(state, Math.max(1, Math.round(5 * compMult)));
+                pushFloatingEffect(state, bakery.x, bakery.y - 16, '+2 🍞', '#fde68a');
                 recordResourceOperation(state, {
                   actorName: agent.name,
                   targetName: bakery.name,
@@ -2082,6 +2139,7 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
 
                 agent.toolsCount += 1;
                 agent.coins += mintBackedCoins(state, Math.max(2, Math.round(9 * compMult)));
+                pushFloatingEffect(state, forge.x, forge.y - 16, '+1 ⚒️', '#fdba74');
                 recordResourceOperation(state, {
                   actorName: agent.name,
                   targetName: forge.name,
@@ -2111,6 +2169,7 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
 
                 agent.medicineCount += 1;
                 agent.coins += mintBackedCoins(state, Math.max(2, Math.round(6 * compMult)));
+                pushFloatingEffect(state, apothecary.x, apothecary.y - 16, '+1 💊', '#5eead4');
                 recordResourceOperation(state, {
                   actorName: agent.name,
                   targetName: apothecary.name,
@@ -2328,12 +2387,87 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
   recalculateEconomyReserve(state);
 }
 
+function getSunShadowOffset(
+  minute: number,
+  isNight: boolean
+): { dx: number; dy: number; alpha: number } {
+  if (isNight) return { dx: 0, dy: 2, alpha: 0.24 };
+  const t = clamp((minute - 360) / 780, 0, 1);
+  const dx = Math.round((0.5 - t) * 14);
+  const dy = 3 + Math.round(Math.abs(t - 0.5) * 4);
+  const alpha = 0.2 + Math.abs(t - 0.5) * 0.22;
+  return { dx, dy, alpha };
+}
+
+function drawWarmHalo(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  radius: number,
+  innerRgba: string
+): void {
+  const grad = ctx.createRadialGradient(x, y, 2, x, y, radius);
+  grad.addColorStop(0, innerRgba);
+  grad.addColorStop(0.55, innerRgba.replace(/[\d.]+\)$/, '0.14)'));
+  grad.addColorStop(1, 'rgba(253, 224, 71, 0)');
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.arc(x, y, radius, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawSmokePuffs(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  phase: number,
+  dark = false
+): void {
+  for (let i = 0; i < 3; i++) {
+    const p = (phase * 0.35 + i * 0.33) % 1;
+    const py = Math.round(y - p * 18);
+    const px = Math.round(x + Math.sin(p * Math.PI * 2 + i) * 3);
+    const sz = Math.round(3 + p * 4);
+    const alpha = Math.max(0.08, (1 - p) * 0.5);
+    ctx.fillStyle = dark ? `rgba(71, 85, 105, ${alpha})` : `rgba(226, 232, 240, ${alpha})`;
+    ctx.fillRect(px - Math.floor(sz / 2), py - Math.floor(sz / 2), sz, sz);
+  }
+}
+
+function drawStructureWearOverlay(
+  ctx: CanvasRenderingContext2D,
+  leftX: number,
+  topY: number,
+  w: number,
+  h: number,
+  durability: number,
+  status?: MaintenanceStatus
+): void {
+  if (durability >= 80 && (!status || status === 'ok')) return;
+  const severe = status === 'inoperative' || status === 'ruined' || durability < 35;
+  ctx.fillStyle = severe ? 'rgba(15, 23, 42, 0.72)' : 'rgba(30, 41, 59, 0.55)';
+  // Grietas pixel-art en muros
+  ctx.fillRect(leftX + 5, topY + 6, 2, 7);
+  ctx.fillRect(leftX + 7, topY + 11, 2, 5);
+  ctx.fillRect(leftX + w - 9, topY + 4, 2, 6);
+  ctx.fillRect(leftX + w - 11, topY + 9, 2, 5);
+  if (severe) {
+    // Techo dañado / tablones faltantes y manchas oscuras
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.55)';
+    ctx.fillRect(leftX + Math.floor(w * 0.32), topY - 4, 6, 4);
+    ctx.fillRect(leftX + 3, topY + h - 5, Math.floor(w * 0.35), 3);
+  }
+}
+
 function drawLeftForestAndRightMountains(
   ctx: CanvasRenderingContext2D,
-  season: SimulationState['season']
+  season: SimulationState['season'],
+  animPhase: number,
+  shadow: { dx: number; dy: number; alpha: number }
 ): void {
   const isWinter = season === 'Invierno';
   const isAutumn = season === 'Otoño';
+  const isSpring = season === 'Primavera';
 
   ctx.fillStyle = isWinter ? 'rgba(20, 48, 42, 0.45)' : 'rgba(13, 52, 24, 0.42)';
   ctx.fillRect(0, 0, FOREST_MAX_X, CANVAS_HEIGHT);
@@ -2343,14 +2477,41 @@ function drawLeftForestAndRightMountains(
     for (let tx = 26; tx < FOREST_MAX_X - 24; tx += 58) {
       const ox = tx + ((ty * 7) % 21);
       const oy = ty + ((tx * 3) % 15);
+      const sway = Math.round(Math.sin(animPhase * 1.4 + ox * 0.09 + oy * 0.05) * 1.4);
+
+      // Sombra direccional según altura solar
+      ctx.fillStyle = `rgba(0, 0, 0, ${shadow.alpha})`;
+      ctx.fillRect(ox - 9 + shadow.dx, oy + 7 + Math.min(4, shadow.dy), 18, 5);
+
       ctx.fillStyle = '#451a03';
       ctx.fillRect(ox - 3, oy + 4, 6, 11);
       ctx.fillStyle = isWinter ? '#334155' : isAutumn ? '#b45309' : '#14532d';
-      ctx.fillRect(ox - 12, oy - 6, 24, 12);
+      ctx.fillRect(ox - 12 + Math.round(sway * 0.5), oy - 6, 24, 12);
       ctx.fillStyle = isWinter ? '#64748b' : isAutumn ? '#d97706' : '#15803d';
-      ctx.fillRect(ox - 9, oy - 13, 18, 9);
+      ctx.fillRect(ox - 9 + sway, oy - 13, 18, 9);
       ctx.fillStyle = isWinter ? '#cbd5e1' : isAutumn ? '#f59e0b' : '#22c55e';
-      ctx.fillRect(ox - 5, oy - 18, 10, 6);
+      ctx.fillRect(ox - 5 + sway, oy - 18, 10, 6);
+
+      if (isSpring) {
+        // Brotes/flores primaverales
+        ctx.fillStyle = (ox + oy) % 2 === 0 ? '#f9a8d4' : '#fef08a';
+        ctx.fillRect(ox - 6 + sway, oy - 11, 2, 2);
+        ctx.fillRect(ox + 3 + sway, oy - 7, 2, 2);
+      } else if (isWinter) {
+        // Nieve sobre copa
+        ctx.fillStyle = '#f8fafc';
+        ctx.fillRect(ox - 5 + sway, oy - 19, 10, 3);
+      }
+    }
+  }
+
+  // Hojas cayendo suavemente en Otoño dentro del bosque
+  if (isAutumn) {
+    for (let i = 0; i < 16; i++) {
+      const lx = ((i * 37 + Math.floor(animPhase * 12)) % (FOREST_MAX_X - 18)) + 8;
+      const ly = ((i * 59 + Math.floor(animPhase * 22)) % (CANVAS_HEIGHT - 20)) + 10;
+      ctx.fillStyle = i % 2 === 0 ? '#f59e0b' : '#ea580c';
+      ctx.fillRect(lx, ly, 3, 2);
     }
   }
 
@@ -2362,8 +2523,8 @@ function drawLeftForestAndRightMountains(
     for (let mx = MOUNTAIN_MIN_X + 34; mx < CANVAS_WIDTH - 24; mx += 78) {
       const ox = mx + ((my * 5) % 19);
       const oy = my + ((mx * 3) % 15);
-      ctx.fillStyle = 'rgba(0,0,0,0.28)';
-      ctx.fillRect(ox - 24, oy + 14, 48, 6);
+      ctx.fillStyle = `rgba(0,0,0,${shadow.alpha + 0.08})`;
+      ctx.fillRect(ox - 24 + Math.round(shadow.dx * 0.7), oy + 14 + Math.min(4, shadow.dy), 48, 6);
       ctx.fillStyle = '#334155';
       ctx.fillRect(ox - 22, oy, 44, 16);
       ctx.fillStyle = '#475569';
@@ -2394,7 +2555,8 @@ function drawCenterRiver(
   minute: number,
   season: SimulationState['season'],
   bridge: SimulationState['bridge'],
-  isBridgeSelected: boolean
+  isBridgeSelected: boolean,
+  animPhase: number
 ): void {
   const isWinter = season === 'Invierno';
   // Riberas arenosas / empedradas superior e inferior
@@ -2410,12 +2572,30 @@ function drawCenterRiver(
   ctx.fillStyle = isWinter ? '#93c5fd' : '#2563eb';
   ctx.fillRect(0, RIVER_TOP_Y + 12, CANVAS_WIDTH, RIVER_BOTTOM_Y - RIVER_TOP_Y - 24);
 
-  const shift = Math.floor(minute * 1.4) % 48;
+  // Espuma sutil en las orillas
+  ctx.fillStyle = isWinter ? 'rgba(248, 250, 252, 0.42)' : 'rgba(186, 230, 253, 0.25)';
+  for (let sx = 0; sx < CANVAS_WIDTH; sx += 28) {
+    const off = Math.round(Math.sin(animPhase * 2 + sx * 0.05) * 2);
+    ctx.fillRect(sx + off, RIVER_TOP_Y + 1, 14, 2);
+    ctx.fillRect(sx - off, RIVER_BOTTOM_Y - 3, 14, 2);
+  }
+
+  const shift = Math.floor(minute * 1.4 + animPhase * 8) % 48;
   ctx.fillStyle = isWinter ? '#e0f2fe' : '#60a5fa';
   for (let rx = -48 + shift; rx < CANVAS_WIDTH + 48; rx += 48) {
     ctx.fillRect(rx, RIVER_TOP_Y + 8, 16, 3);
     ctx.fillRect(rx + 20, RIVER_TOP_Y + 28, 18, 3);
     ctx.fillRect(rx + 8, RIVER_TOP_Y + 48, 14, 2);
+  }
+
+  // Neblina matinal suave sobre el río al amanecer (05:30 - 08:40)
+  if (minute >= 330 && minute <= 520) {
+    const mistDrift = Math.round(Math.sin(animPhase * 0.7) * 18);
+    ctx.fillStyle = 'rgba(226, 232, 240, 0.14)';
+    for (let mx = -40 + mistDrift; mx < CANVAS_WIDTH; mx += 160) {
+      ctx.fillRect(mx, RIVER_TOP_Y - 6, 96, 18);
+      ctx.fillRect(mx + 44, RIVER_BOTTOM_Y - 12, 88, 16);
+    }
   }
 
   // Etiquetas sutiles Zona Norte / Zona Sur para orientar al jugador
@@ -2441,11 +2621,31 @@ function drawCenterRiver(
     ctx.fillRect(bxMin, RIVER_TOP_Y - 6, bridgeW, RIVER_BOTTOM_Y - RIVER_TOP_Y + 12);
     ctx.fillStyle = passable ? '#92400e' : '#7f1d1d';
     for (let by = RIVER_TOP_Y - 4; by <= RIVER_BOTTOM_Y + 2; by += 6) {
+      // Si el puente está bloqueado/inoperativo, deja huecos rotos en el centro dejando ver el agua
+      if (!passable && by >= RIVER_TOP_Y + 16 && by <= RIVER_BOTTOM_Y - 16) {
+        ctx.fillStyle = '#1d4ed8';
+        ctx.fillRect(bxMin + 8, by, bridgeW - 16, 4);
+        ctx.fillStyle = '#7f1d1d';
+        continue;
+      }
       ctx.fillRect(bxMin + 3, by, bridgeW - 6, 4);
     }
     ctx.fillStyle = '#451a03';
     ctx.fillRect(bxMin, RIVER_TOP_Y - 6, 4, RIVER_BOTTOM_Y - RIVER_TOP_Y + 12);
     ctx.fillRect(bxMin + bridgeW - 4, RIVER_TOP_Y - 6, 4, RIVER_BOTTOM_Y - RIVER_TOP_Y + 12);
+
+    if (!passable) {
+      // Barrera roja y blanca en ambos extremos indicando paso cerrado
+      ctx.fillStyle = '#dc2626';
+      ctx.fillRect(bxMin + 2, RIVER_TOP_Y - 6, bridgeW - 4, 3);
+      ctx.fillRect(bxMin + 2, RIVER_BOTTOM_Y + 3, bridgeW - 4, 3);
+      ctx.fillStyle = '#f8fafc';
+      ctx.fillRect(bxMin + 8, RIVER_TOP_Y - 6, 6, 3);
+      ctx.fillRect(bxMin + bridgeW - 14, RIVER_TOP_Y - 6, 6, 3);
+      ctx.fillRect(bxMin + 8, RIVER_BOTTOM_Y + 3, 6, 3);
+      ctx.fillRect(bxMin + bridgeW - 14, RIVER_BOTTOM_Y + 3, 6, 3);
+    }
+
     if (!passable || bridge.maintenanceStatus !== 'ok') {
       ctx.fillStyle = !passable ? 'rgba(153, 27, 27, 0.92)' : 'rgba(180, 83, 9, 0.92)';
       ctx.fillRect(bridge.x - 28, RIVER_TOP_Y + 22, 56, 11);
@@ -2555,6 +2755,8 @@ function drawCentralPlaza(
     ctx.fillRect(lx, ly - 3, 4, 4);
   }
 
+  drawStructureWearOverlay(ctx, -56, -40, 112, 80, plaza.durability, plaza.maintenanceStatus);
+
   if (isSelected) {
     ctx.strokeStyle = '#facc15';
     ctx.lineWidth = 2;
@@ -2621,6 +2823,8 @@ function drawFarmPlot(ctx: CanvasRenderingContext2D, plot: FarmPlot, isSelected:
     ctx.fillRect(halfW - 8, halfH - 7, 6, 5);
   }
 
+  drawStructureWearOverlay(ctx, -halfW, -halfH, halfW * 2, halfH * 2, plot.durability, plot.maintenanceStatus);
+
   if (isSelected) {
     ctx.strokeStyle = '#facc15';
     ctx.lineWidth = 2;
@@ -2634,17 +2838,22 @@ function drawSpecialBuilding(
   ctx: CanvasRenderingContext2D,
   b: SpecialBuilding,
   isNight: boolean,
-  isSelected: boolean
+  isSelected: boolean,
+  season: SimulationState['season'],
+  shadow: { dx: number; dy: number; alpha: number },
+  animPhase: number
 ): void {
   const x = Math.round(b.x);
   const y = Math.round(b.y);
   ctx.save();
   ctx.translate(x, y);
 
+  // Sombra direccional según ángulo solar
+  ctx.fillStyle = `rgba(0,0,0,${shadow.alpha + 0.14})`;
+  ctx.fillRect(-30 + shadow.dx, 14 + Math.min(4, shadow.dy), 60, 7);
+
   switch (b.type) {
     case 'dock': {
-      ctx.fillStyle = 'rgba(0,0,0,0.4)';
-      ctx.fillRect(-30, 12, 60, 6);
       ctx.fillStyle = '#78350f';
       ctx.fillRect(-30, -24, 60, 34);
       ctx.fillStyle = '#92400e';
@@ -2661,8 +2870,6 @@ function drawSpecialBuilding(
       break;
     }
     case 'bank': {
-      ctx.fillStyle = 'rgba(0,0,0,0.42)';
-      ctx.fillRect(-32, 17, 64, 7);
       ctx.fillStyle = '#e2e8f0';
       ctx.fillRect(-29, -13, 58, 30);
       ctx.fillStyle = '#94a3b8';
@@ -2683,8 +2890,6 @@ function drawSpecialBuilding(
       break;
     }
     case 'infirmary': {
-      ctx.fillStyle = 'rgba(0,0,0,0.42)';
-      ctx.fillRect(-34, 18, 68, 7);
       ctx.fillStyle = '#f8fafc';
       ctx.fillRect(-32, -14, 64, 32);
       ctx.fillStyle = '#dc2626';
@@ -2697,14 +2902,12 @@ function drawSpecialBuilding(
       ctx.fillRect(-5, -24, 10, 4);
       ctx.fillStyle = '#0f172a';
       ctx.fillRect(-5, 6, 10, 12);
-      ctx.fillStyle = isNight ? '#fef08a' : '#bae6fd';
+      ctx.fillStyle = isNight && b.isOperational ? '#fef08a' : '#bae6fd';
       ctx.fillRect(-26, -6, 7, 7);
       ctx.fillRect(19, -6, 7, 7);
       break;
     }
     case 'school': {
-      ctx.fillStyle = 'rgba(0,0,0,0.42)';
-      ctx.fillRect(-33, 18, 66, 7);
       ctx.fillStyle = '#e2e8f0';
       ctx.fillRect(-30, -13, 60, 31);
       ctx.fillStyle = '#1d4ed8';
@@ -2716,14 +2919,12 @@ function drawSpecialBuilding(
       ctx.fillRect(-3, -34, 6, 6);
       ctx.fillStyle = '#78350f';
       ctx.fillRect(-5, 6, 10, 12);
-      ctx.fillStyle = isNight ? '#fde047' : '#60a5fa';
+      ctx.fillStyle = isNight && b.isOperational ? '#fde047' : '#60a5fa';
       ctx.fillRect(-24, -4, 7, 7);
       ctx.fillRect(17, -4, 7, 7);
       break;
     }
     case 'market': {
-      ctx.fillStyle = 'rgba(0,0,0,0.42)';
-      ctx.fillRect(-33, 16, 66, 7);
       ctx.fillStyle = '#78350f';
       ctx.fillRect(-30, -6, 60, 22);
       for (let i = -32; i < 32; i += 8) {
@@ -2740,63 +2941,67 @@ function drawSpecialBuilding(
       break;
     }
     case 'bakery': {
-      ctx.fillStyle = 'rgba(0,0,0,0.4)';
-      ctx.fillRect(-24, 14, 48, 6);
       ctx.fillStyle = '#d97706';
       ctx.fillRect(-21, -10, 42, 24);
       ctx.fillStyle = '#92400e';
       ctx.fillRect(-24, -17, 48, 8);
       ctx.fillStyle = '#7c2d12';
       ctx.fillRect(10, -29, 7, 12);
-      ctx.fillStyle = '#fde68a';
+      ctx.fillStyle = b.isOperational ? '#fde68a' : '#94a3b8';
       ctx.fillRect(-16, -2, 11, 7);
       ctx.fillStyle = '#451a03';
       ctx.fillRect(1, 4, 8, 10);
+      if (b.isOperational) drawSmokePuffs(ctx, 13, -31, animPhase);
       break;
     }
     case 'carpentry': {
-      ctx.fillStyle = 'rgba(0,0,0,0.4)';
-      ctx.fillRect(-27, 15, 54, 6);
       ctx.fillStyle = '#9a6b3f';
       ctx.fillRect(-24, -11, 48, 26);
       ctx.fillStyle = '#654321';
       ctx.fillRect(-27, -18, 54, 8);
       ctx.fillStyle = '#451a03';
       ctx.fillRect(-4, 5, 8, 10);
-      ctx.fillStyle = isNight ? '#fde047' : '#93c5fd';
+      ctx.fillStyle = isNight && b.isOperational ? '#fde047' : '#93c5fd';
       ctx.fillRect(10, -3, 8, 6);
       break;
     }
     case 'forge': {
-      ctx.fillStyle = 'rgba(0,0,0,0.42)';
-      ctx.fillRect(-28, 15, 56, 6);
       ctx.fillStyle = '#475569';
       ctx.fillRect(-25, -11, 50, 26);
       ctx.fillStyle = '#ea580c';
       ctx.fillRect(-28, -18, 56, 8);
-      ctx.fillStyle = '#f97316';
+      ctx.fillStyle = '#334155';
+      ctx.fillRect(11, -28, 7, 10);
+      ctx.fillStyle = b.isOperational ? '#f97316' : '#334155';
       ctx.fillRect(-7, 3, 12, 12);
-      ctx.fillStyle = '#fde047';
+      ctx.fillStyle = b.isOperational ? '#fde047' : '#64748b';
       ctx.fillRect(-3, 7, 5, 6);
+      if (b.isOperational) {
+        drawSmokePuffs(ctx, 14, -30, animPhase, true);
+        // Chispas de forja
+        if (Math.floor(animPhase * 4) % 2 === 0) {
+          ctx.fillStyle = '#fef08a';
+          ctx.fillRect(-5, 0, 2, 2);
+          ctx.fillRect(2, -1, 2, 2);
+        }
+      }
       break;
     }
     case 'apothecary': {
-      ctx.fillStyle = 'rgba(0,0,0,0.4)';
-      ctx.fillRect(-23, 14, 46, 6);
       ctx.fillStyle = '#6b7280';
       ctx.fillRect(-20, -10, 40, 24);
       ctx.fillStyle = '#0f766e';
       ctx.fillRect(-23, -17, 46, 8);
+      ctx.fillStyle = '#475569';
+      ctx.fillRect(9, -26, 5, 9);
       ctx.fillStyle = '#2dd4bf';
       ctx.fillRect(-4, -20, 8, 7);
       ctx.fillStyle = '#1e293b';
       ctx.fillRect(-4, 4, 8, 10);
+      if (b.isOperational) drawSmokePuffs(ctx, 11, -28, animPhase + 0.5);
       break;
     }
     case 'general_depot': {
-      // DEPÓSITO GENERAL (bodega amplia con cajas)
-      ctx.fillStyle = 'rgba(0,0,0,0.42)';
-      ctx.fillRect(-32, 16, 64, 7);
       ctx.fillStyle = '#854d0e';
       ctx.fillRect(-29, -12, 58, 28);
       ctx.fillStyle = '#451a03';
@@ -2809,9 +3014,6 @@ function drawSpecialBuilding(
       break;
     }
     case 'town_hall': {
-      // AYUNTAMIENTO con torre reloj y estandarte
-      ctx.fillStyle = 'rgba(0,0,0,0.44)';
-      ctx.fillRect(-35, 18, 70, 7);
       ctx.fillStyle = '#cbd5e1';
       ctx.fillRect(-32, -14, 64, 32);
       ctx.fillStyle = '#7e22ce';
@@ -2825,9 +3027,6 @@ function drawSpecialBuilding(
       break;
     }
     case 'police_station': {
-      // COMISARÍA con insignia azul y farol policial
-      ctx.fillStyle = 'rgba(0,0,0,0.42)';
-      ctx.fillRect(-27, 15, 54, 6);
       ctx.fillStyle = '#334155';
       ctx.fillRect(-24, -12, 48, 27);
       ctx.fillStyle = '#1d4ed8';
@@ -2839,9 +3038,6 @@ function drawSpecialBuilding(
       break;
     }
     case 'prison': {
-      // CÁRCEL de piedra con rejas metálicas
-      ctx.fillStyle = 'rgba(0,0,0,0.42)';
-      ctx.fillRect(-28, 15, 56, 6);
       ctx.fillStyle = '#475569';
       ctx.fillRect(-25, -12, 50, 27);
       ctx.fillStyle = '#1e293b';
@@ -2856,6 +3052,19 @@ function drawSpecialBuilding(
     }
   }
 
+  if (season === 'Invierno' && b.type !== 'dock') {
+    ctx.fillStyle = 'rgba(248, 250, 252, 0.82)';
+    ctx.fillRect(-26, -21, 52, 3);
+  }
+
+  drawStructureWearOverlay(ctx, -26, -15, 52, 30, b.durability, b.maintenanceStatus);
+
+  // Edificio obsoleto sin administrador: atenuado discreto + icono de pausa
+  if (!b.isOperational) {
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.34)';
+    ctx.fillRect(-30, -22, 60, 38);
+  }
+
   if (isSelected) {
     ctx.strokeStyle = '#facc15';
     ctx.lineWidth = 2;
@@ -2864,11 +3073,11 @@ function drawSpecialBuilding(
 
   const short = SPECIAL_BUILDING_LABELS[b.type].short;
   ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
-  ctx.fillRect(-26, -48, 52, 11);
+  ctx.fillRect(-28, -48, 56, 11);
   ctx.fillStyle = b.isOperational ? '#4ade80' : '#fb7185';
   ctx.font = 'bold 8px monospace';
   ctx.textAlign = 'center';
-  ctx.fillText(`${short} N${b.level}`, 0, -39);
+  ctx.fillText(`${!b.isOperational ? '⏸ ' : ''}${short} N${b.level}`, 0, -39);
 
   if (b.durability < 65) {
     ctx.fillStyle = '#1e293b';
@@ -2892,7 +3101,11 @@ function drawPixelHouse(
   ctx: CanvasRenderingContext2D,
   house: House,
   isNight: boolean,
-  isSelected: boolean
+  isSelected: boolean,
+  hasResidents: boolean,
+  season: SimulationState['season'],
+  shadow: { dx: number; dy: number; alpha: number },
+  animPhase: number
 ): void {
   const x = Math.round(house.x);
   const y = Math.round(house.y);
@@ -2916,8 +3129,9 @@ function drawPixelHouse(
   const w = house.size === 'large' ? 54 : house.size === 'medium' ? 40 : 28;
   const h = house.size === 'large' ? 26 : house.size === 'medium' ? 20 : 16;
 
-  ctx.fillStyle = 'rgba(0,0,0,0.36)';
-  ctx.fillRect(-w / 2 - 2, h / 2 + 3, w + 4, 6);
+  // Sombra direccional solar
+  ctx.fillStyle = `rgba(0,0,0,${shadow.alpha + 0.1})`;
+  ctx.fillRect(-w / 2 - 2 + shadow.dx, h / 2 + 2 + Math.min(4, shadow.dy), w + 4, 6);
 
   ctx.fillStyle = wallColors[house.level];
   ctx.fillRect(-w / 2, -h / 2 + 4, w, h);
@@ -2929,11 +3143,20 @@ function drawPixelHouse(
     ctx.fillRect(-w / 2 + 9, -h / 2 - 13, w - 18, 5);
   }
 
+  if (season === 'Invierno') {
+    ctx.fillStyle = '#f8fafc';
+    ctx.fillRect(-w / 2 - 2, -h / 2 - 3, w + 4, 2);
+    ctx.fillRect(-w / 2 + 4, -h / 2 - 9, w - 8, 2);
+  }
+
   if (house.level >= 2 || house.size !== 'small') {
     ctx.fillStyle = '#475569';
     ctx.fillRect(w / 2 - 8, -h / 2 - 14, 5, 8);
     if (house.size === 'large') {
       ctx.fillRect(-w / 2 + 4, -h / 2 - 14, 5, 8);
+    }
+    if (hasResidents) {
+      drawSmokePuffs(ctx, w / 2 - 6, -h / 2 - 16, animPhase + house.id * 0.27);
     }
   }
 
@@ -2941,7 +3164,7 @@ function drawPixelHouse(
   const doorW = house.size === 'large' ? 10 : 6;
   ctx.fillRect(-doorW / 2, h / 2 - 6, doorW, 10);
 
-  ctx.fillStyle = isNight ? '#fde047' : '#38bdf8';
+  ctx.fillStyle = isNight ? (hasResidents ? '#fde047' : '#475569') : '#38bdf8';
   if (house.size === 'large') {
     ctx.fillRect(-w / 2 + 5, -5, 5, 5);
     ctx.fillRect(-w / 2 + 13, -5, 5, 5);
@@ -2953,6 +3176,8 @@ function drawPixelHouse(
   } else {
     ctx.fillRect(-w / 2 + 4, -2, 4, 4);
   }
+
+  drawStructureWearOverlay(ctx, -w / 2, -h / 2 + 4, w, h, house.durability, house.maintenanceStatus);
 
   if (house.durability < 65) {
     ctx.fillStyle = '#1e293b';
@@ -2987,7 +3212,12 @@ function drawPixelHouse(
   ctx.restore();
 }
 
-function drawPixelAnimal(ctx: CanvasRenderingContext2D, animal: Animal, isSelected: boolean): void {
+function drawPixelAnimal(
+  ctx: CanvasRenderingContext2D,
+  animal: Animal,
+  isSelected: boolean,
+  animPhase: number
+): void {
   const x = Math.round(animal.x);
   const y = Math.round(animal.y);
   const dir = animal.vx >= 0 ? 1 : -1;
@@ -2995,6 +3225,17 @@ function drawPixelAnimal(ctx: CanvasRenderingContext2D, animal: Animal, isSelect
 
   ctx.save();
   ctx.translate(x, y);
+
+  if (animal.type === 'fish') {
+    // Ondas en el agua alrededor de cada pez
+    const rippleR = 6 + ((animPhase * 4 + animal.id) % 6);
+    ctx.strokeStyle = 'rgba(186, 230, 253, 0.45)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, rippleR, rippleR * 0.45, 0, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
   ctx.scale(dir, 1);
 
   switch (animal.type) {
@@ -3091,6 +3332,8 @@ function drawPixelAnimal(ctx: CanvasRenderingContext2D, animal: Animal, isSelect
       break;
     }
     case 'horse': {
+      ctx.fillStyle = 'rgba(0,0,0,0.3)';
+      ctx.fillRect(-9, 8, 18, 3);
       ctx.fillStyle = '#92400e';
       ctx.fillRect(-9, -4, 16, 8);
       ctx.fillRect(5, -10, 5, 8);
@@ -3100,6 +3343,18 @@ function drawPixelAnimal(ctx: CanvasRenderingContext2D, animal: Animal, isSelect
       ctx.fillStyle = '#78350f';
       ctx.fillRect(-8, 4 + step, 2, 5);
       ctx.fillRect(6, 4 - step, 2, 5);
+      if (animal.riderId !== null) {
+        // Alforjas de caravana cargadas + silla + estela de polvo al trotar
+        ctx.fillStyle = '#b45309';
+        ctx.fillRect(-6, -5, 9, 5);
+        ctx.fillStyle = '#facc15';
+        ctx.fillRect(-5, -3, 3, 2);
+        ctx.fillRect(-1, -3, 3, 2);
+        const dust = Math.floor(animPhase * 4) % 3;
+        ctx.fillStyle = 'rgba(214, 211, 209, 0.55)';
+        ctx.fillRect(-13 - dust * 2, 6, 3, 2);
+        ctx.fillRect(-17 - dust, 7, 2, 2);
+      }
       break;
     }
     case 'sheep': {
@@ -3126,9 +3381,14 @@ function drawPixelAnimal(ctx: CanvasRenderingContext2D, animal: Animal, isSelect
 }
 
 /**
- * Diferenciación sutil y legible en pixel-art entre Mujer, Hombre y Niño/a.
+ * Diferenciación sutil y legible en pixel-art entre Mujer, Hombre, Niño/a y su Oficio/Herramienta.
  */
-function drawPixelAgent(ctx: CanvasRenderingContext2D, agent: Agent, selectedId: number | null): void {
+function drawPixelAgent(
+  ctx: CanvasRenderingContext2D,
+  agent: Agent,
+  selectedId: number | null,
+  animPhase: number
+): void {
   const x = Math.round(agent.x);
   const y = Math.round(agent.y);
   const scale = agent.isChild ? 0.68 : 1;
@@ -3149,7 +3409,6 @@ function drawPixelAgent(ctx: CanvasRenderingContext2D, agent: Agent, selectedId:
   ctx.fillRect(1, 8 - step, 3, 2);
 
   if (!agent.isChild && agent.sex === 'F') {
-    // Mujer: silueta definida de vestido / falda acampanada con lazo y cuello
     ctx.fillStyle = agent.shirt;
     ctx.fillRect(-4, -4, 8, 6);
     ctx.fillRect(-6, 1, 12, 5);
@@ -3158,7 +3417,6 @@ function drawPixelAgent(ctx: CanvasRenderingContext2D, agent: Agent, selectedId:
     ctx.fillStyle = '#f472b6';
     ctx.fillRect(-4, 0, 8, 1);
   } else if (!agent.isChild && agent.sex === 'M') {
-    // Hombre: hombros anchos, chaleco y cinturón con hebilla
     ctx.fillStyle = agent.shirt;
     ctx.fillRect(-5, -4, 10, 8);
     ctx.fillStyle = 'rgba(15, 23, 42, 0.25)';
@@ -3169,16 +3427,81 @@ function drawPixelAgent(ctx: CanvasRenderingContext2D, agent: Agent, selectedId:
     ctx.fillStyle = '#facc15';
     ctx.fillRect(-1, 3, 2, 2);
   } else {
-    // Niño/a: túnica compacta con peto y proporción infantil
     ctx.fillStyle = agent.shirt;
     ctx.fillRect(-4, -3, 8, 7);
     ctx.fillStyle = '#e2e8f0';
     ctx.fillRect(-2, -3, 4, 2);
   }
 
+  // Rasgos de vestimenta por oficio
+  if (!agent.isChild) {
+    if (agent.job === 'Herrero' || agent.job === 'Artesano') {
+      // Delantal de cuero oscuro
+      ctx.fillStyle = '#451a03';
+      ctx.fillRect(-3, -2, 6, 7);
+    } else if (agent.job === 'Curandero' || agent.job === 'Boticario') {
+      // Túnica clara + cruz médica o frasco
+      ctx.fillStyle = '#f8fafc';
+      ctx.fillRect(-3, -3, 6, 7);
+      ctx.fillStyle = agent.job === 'Curandero' ? '#ef4444' : '#14b8a6';
+      ctx.fillRect(-1, -1, 2, 4);
+      ctx.fillRect(-2, 0, 4, 2);
+    } else if (agent.job === 'Comisario' || agent.job === 'Guardián') {
+      // Capa oscura y placa dorada
+      ctx.fillStyle = agent.job === 'Comisario' ? '#1e3a8a' : '#7f1d1d';
+      ctx.fillRect(-6, -4, 2, 8);
+      ctx.fillRect(4, -4, 2, 8);
+      ctx.fillStyle = '#facc15';
+      ctx.fillRect(1, -3, 2, 2);
+    } else if (agent.job === 'Constructor') {
+      // Chaleco de obra ámbar
+      ctx.fillStyle = '#d97706';
+      ctx.fillRect(-4, -4, 2, 6);
+      ctx.fillRect(2, -4, 2, 6);
+    } else if (agent.job === 'Banquero' || agent.job === 'Alcalde') {
+      ctx.fillStyle = '#0f172a';
+      ctx.fillRect(-4, -4, 8, 7);
+      ctx.fillStyle = '#facc15';
+      ctx.fillRect(-1, -2, 2, 3);
+    }
+  }
+
   ctx.fillStyle = agent.isSick ? '#cbd5e1' : agent.skin;
   ctx.fillRect(-7, -3, 2, 6);
   ctx.fillRect(5, -3, 2, 6);
+
+  // Herramientas y atributos en mano según oficio o herramientas equipadas
+  if (!agent.isChild) {
+    if (agent.job === 'Pescador' && agent.taskType === 'fish_river') {
+      // Caña de pescar extendida
+      ctx.fillStyle = '#78350f';
+      ctx.fillRect(6, -12, 2, 10);
+      ctx.fillStyle = '#bae6fd';
+      ctx.fillRect(8, -11, 1, 10);
+    } else if (agent.job === 'Comisario' || agent.job === 'Guardián') {
+      // Lanza / bastón de guardia
+      ctx.fillStyle = '#78350f';
+      ctx.fillRect(-8, -10, 1, 16);
+      ctx.fillStyle = '#cbd5e1';
+      ctx.fillRect(-8, -13, 2, 3);
+    } else if (agent.job === 'Herrero' || agent.job === 'Constructor') {
+      // Martillo / mazo
+      ctx.fillStyle = '#78350f';
+      ctx.fillRect(6, -4, 1, 6);
+      ctx.fillStyle = '#94a3b8';
+      ctx.fillRect(5, -6, 4, 2);
+    } else if (agent.job === 'Carpintero' || agent.job === 'Leñador') {
+      // Hacha
+      ctx.fillStyle = '#78350f';
+      ctx.fillRect(6, -5, 1, 7);
+      ctx.fillStyle = '#cbd5e1';
+      ctx.fillRect(7, -5, 3, 3);
+    } else if (agent.toolsCount > 0) {
+      // Brillo metálico de herramienta equipada
+      ctx.fillStyle = '#cbd5e1';
+      ctx.fillRect(6, -2, 2, 5);
+    }
+  }
 
   ctx.fillStyle = agent.isSick ? '#d9e3d8' : agent.skin;
   ctx.fillRect(-4, -12, 8, 8);
@@ -3214,11 +3537,36 @@ function drawPixelAgent(ctx: CanvasRenderingContext2D, agent: Agent, selectedId:
     ctx.fillRect(4, -12, 3, 5);
   }
 
+  // Sombreros / cascos distintivos por oficio
+  if (!agent.isChild) {
+    if (agent.job === 'Minero') {
+      ctx.fillStyle = '#facc15';
+      ctx.fillRect(-4, -15, 8, 3);
+      ctx.fillStyle = '#fef08a';
+      ctx.fillRect(-1, -15, 2, 2);
+    } else if (agent.job === 'Panadero') {
+      ctx.fillStyle = '#f8fafc';
+      ctx.fillRect(-4, -15, 8, 2);
+      ctx.fillRect(-3, -18, 6, 3);
+    } else if (agent.job === 'Pescador') {
+      ctx.fillStyle = '#eab308';
+      ctx.fillRect(-6, -14, 12, 2);
+      ctx.fillRect(-3, -16, 6, 2);
+    } else if (agent.job === 'Alcalde' || agent.job === 'Banquero') {
+      ctx.fillStyle = '#1e293b';
+      ctx.fillRect(-5, -14, 10, 2);
+      ctx.fillRect(-3, -18, 6, 4);
+    } else if (agent.job === 'Erudito') {
+      ctx.fillStyle = '#312e81';
+      ctx.fillRect(-5, -15, 10, 2);
+    }
+  }
+
   if (agent.isRepresentative) {
     ctx.fillStyle = '#facc15';
-    ctx.fillRect(-3, -17, 6, 2);
-    ctx.fillRect(-2, -19, 1, 2);
-    ctx.fillRect(1, -19, 1, 2);
+    ctx.fillRect(-3, -19, 6, 2);
+    ctx.fillRect(-2, -21, 1, 2);
+    ctx.fillRect(1, -21, 1, 2);
   }
 
   if (agent.pregnancy) {
@@ -3268,10 +3616,13 @@ function drawPixelAgent(ctx: CanvasRenderingContext2D, agent: Agent, selectedId:
   }
 
   if (agent.taskType === 'sleep') {
-    ctx.fillStyle = '#38bdf8';
+    const zFloat = (animPhase * 1.4 + agent.id * 0.4) % 1;
+    ctx.fillStyle = `rgba(56, 189, 248, ${1 - zFloat * 0.5})`;
     ctx.font = 'bold 8px monospace';
     ctx.textAlign = 'center';
-    ctx.fillText('Z', 8, -16);
+    ctx.fillText('Z', 8, Math.round(-15 - zFloat * 7));
+    ctx.font = 'bold 6px monospace';
+    ctx.fillText('z', 13, Math.round(-20 - zFloat * 5));
   }
 
   ctx.restore();
@@ -3314,6 +3665,13 @@ export function renderWorld(
   ctx.imageSmoothingEnabled = false;
   const biome = BIOMES[state.biome];
   const isNight = isNightMinute(state.minute);
+  const animPhase = (typeof performance !== 'undefined' ? performance.now() : Date.now()) * 0.002;
+  const shadow = getSunShadowOffset(state.minute, isNight);
+
+  const occupiedHouseIds = new Set<number>();
+  for (const ag of state.agents) {
+    if (ag.houseId !== null) occupiedHouseIds.add(ag.houseId);
+  }
 
   let bg = biome.bg;
   let patch = biome.patch;
@@ -3333,6 +3691,10 @@ export function renderWorld(
   ctx.scale(camera.zoom, camera.zoom);
   ctx.translate(-CANVAS_WIDTH / 2, -CANVAS_HEIGHT / 2);
 
+  ctx.beginPath();
+  ctx.rect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+  ctx.clip();
+
   ctx.fillStyle = bg;
   ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
 
@@ -3344,8 +3706,15 @@ export function renderWorld(
     }
   }
 
-  drawLeftForestAndRightMountains(ctx, state.season);
-  drawCenterRiver(ctx, state.minute, state.season, state.bridge, state.selectedEntity?.kind === 'bridge');
+  drawLeftForestAndRightMountains(ctx, state.season, animPhase, shadow);
+  drawCenterRiver(
+    ctx,
+    state.minute,
+    state.season,
+    state.bridge,
+    state.selectedEntity?.kind === 'bridge',
+    animPhase
+  );
 
   if (state.roads.length > 0) {
     drawRoads(ctx, state.roads);
@@ -3369,14 +3738,24 @@ export function renderWorld(
   const sortedHouses = [...state.houses].sort((a, b) => a.y - b.y);
   for (const house of sortedHouses) {
     const isSel = state.selectedEntity?.kind === 'house' && state.selectedEntity.id === house.id;
-    drawPixelHouse(ctx, house, isNight, isSel);
+    drawPixelHouse(
+      ctx,
+      house,
+      isNight,
+      isSel,
+      occupiedHouseIds.has(house.id),
+      state.season,
+      shadow,
+      animPhase
+    );
   }
   const sortedSpecials = [...state.specialBuildings].sort((a, b) => a.y - b.y);
   for (const b of sortedSpecials) {
     const isSel = state.selectedEntity?.kind === 'special' && state.selectedEntity.id === b.id;
-    drawSpecialBuilding(ctx, b, isNight, isSel);
+    drawSpecialBuilding(ctx, b, isNight, isSel, state.season, shadow, animPhase);
   }
 
+  const glintTick = Math.floor(animPhase * 2.5);
   for (const r of state.resources) {
     const rx = Math.round(r.x);
     const ry = Math.round(r.y);
@@ -3459,6 +3838,10 @@ export function renderWorld(
       ctx.fillRect(rx - 5, ry - 4, 10, 5);
       ctx.fillStyle = '#ffffff';
       ctx.fillRect(rx - 4, ry - 3, 8, 2);
+      if ((glintTick + r.id) % 5 === 0) {
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(rx + 2, ry - 7, 2, 2);
+      }
     } else if (r.type === 'gold') {
       ctx.fillStyle = 'rgba(0,0,0,0.32)';
       ctx.fillRect(rx - 7, ry + 4, 14, 2);
@@ -3468,6 +3851,11 @@ export function renderWorld(
       ctx.fillRect(rx - 5, ry - 4, 10, 5);
       ctx.fillStyle = '#fef08a';
       ctx.fillRect(rx - 4, ry - 3, 7, 2);
+      if ((glintTick + r.id) % 4 === 0) {
+        ctx.fillStyle = '#fef08a';
+        ctx.fillRect(rx - 2, ry - 7, 3, 1);
+        ctx.fillRect(rx - 1, ry - 8, 1, 3);
+      }
     } else if (r.type === 'coins') {
       ctx.fillStyle = 'rgba(0,0,0,0.3)';
       ctx.fillRect(rx - 4, ry + 5, 8, 2);
@@ -3481,7 +3869,7 @@ export function renderWorld(
   const sortedAnimals = [...state.animals].sort((a, b) => a.y - b.y);
   for (const animal of sortedAnimals) {
     const isSel = state.selectedEntity?.kind === 'animal' && state.selectedEntity.id === animal.id;
-    drawPixelAnimal(ctx, animal, isSel);
+    drawPixelAnimal(ctx, animal, isSel, animPhase);
   }
 
   const sortedAgents = [...state.agents].sort((a, b) => a.y - b.y);
@@ -3491,17 +3879,51 @@ export function renderWorld(
     if (agent.activeConstruction) {
       const ac = agent.activeConstruction;
       const pct = clamp(ac.elapsed / Math.max(1, ac.totalDuration), 0, 1);
-      ctx.fillStyle = 'rgba(245, 158, 11, 0.18)';
-      ctx.fillRect(ac.x - 18, ac.y - 14, 36, 28);
-      ctx.strokeStyle = '#f59e0b';
+      // Cimientos, pila de materiales y andamios paso a paso
+      ctx.fillStyle = 'rgba(245, 158, 11, 0.16)';
+      ctx.fillRect(ac.x - 20, ac.y - 14, 40, 28);
+      ctx.strokeStyle = '#d97706';
       ctx.lineWidth = 1.5;
-      ctx.strokeRect(ac.x - 18, ac.y - 14, 36, 28);
+      ctx.strokeRect(ac.x - 20, ac.y - 14, 40, 28);
+
+      // Postes y travesaños de andamio creciendo con el progreso
+      ctx.fillStyle = '#92400e';
+      ctx.fillRect(ac.x - 19, ac.y - 16, 3, 28);
+      ctx.fillRect(ac.x + 16, ac.y - 16, 3, 28);
+      if (pct >= 0.25) ctx.fillRect(ac.x - 19, ac.y - 2, 38, 2);
+      if (pct >= 0.6) ctx.fillRect(ac.x - 19, ac.y - 12, 38, 2);
+
+      // Pilas de madera y piedra en la esquina
+      ctx.fillStyle = '#78350f';
+      ctx.fillRect(ac.x - 24, ac.y + 8, 7, 4);
+      ctx.fillStyle = '#94a3b8';
+      ctx.fillRect(ac.x + 17, ac.y + 9, 6, 4);
+
+      // Polvo/viruta animada cuando el constructor está trabajando encima
+      if (Math.hypot(agent.x - ac.x, agent.y - ac.y) <= 46 && Math.floor(animPhase * 4) % 2 === 0) {
+        ctx.fillStyle = '#fde68a';
+        ctx.fillRect(ac.x - 4 + ((glintTick * 5) % 9), ac.y - 4, 2, 2);
+        ctx.fillRect(ac.x + 4 - ((glintTick * 3) % 8), ac.y + 2, 2, 2);
+      }
+
+      // Barra de avance en el mapa
       ctx.fillStyle = '#0f172a';
-      ctx.fillRect(ac.x - 16, ac.y - 22, 32, 5);
+      ctx.fillRect(ac.x - 18, ac.y - 23, 36, 6);
       ctx.fillStyle = '#10b981';
-      ctx.fillRect(ac.x - 15, ac.y - 21, Math.round(30 * pct), 3);
+      ctx.fillRect(ac.x - 17, ac.y - 22, Math.round(34 * pct), 4);
     }
-    drawPixelAgent(ctx, agent, selAgentId);
+
+    // Salpicaduras en el río cuando un aldeano está pescando
+    if (agent.taskType === 'fish_river' && Math.abs(agent.y - RIVER_BOTTOM_Y) < 28) {
+      const splashR = 4 + ((animPhase * 5 + agent.id) % 5);
+      ctx.strokeStyle = 'rgba(186, 230, 253, 0.55)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.ellipse(agent.x + 6, RIVER_BOTTOM_Y - 3, splashR, splashR * 0.45, 0, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    drawPixelAgent(ctx, agent, selAgentId, animPhase);
   }
 
   // Incendios animados pixel-art
@@ -3519,6 +3941,24 @@ export function renderWorld(
 
   drawFamilyHighlightOverlay(ctx, state);
 
+  // Micro-indicadores flotantes sobre acciones recientes (+1 🍞, +1 🥇, 🔧 Reparado, etc.)
+  if (Array.isArray(state.floatingEffects) && state.floatingEffects.length > 0) {
+    ctx.font = 'bold 9px monospace';
+    ctx.textAlign = 'center';
+    for (const fx of state.floatingEffects) {
+      const alpha = clamp(fx.ttl / Math.max(0.1, fx.maxTtl), 0, 1);
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = 'rgba(15, 23, 42, 0.78)';
+      const w = Math.max(28, fx.text.length * 6 + 6);
+      ctx.fillRect(Math.round(fx.x - w / 2), Math.round(fx.y - 9), w, 12);
+      ctx.fillStyle = fx.color;
+      ctx.fillText(fx.text, Math.round(fx.x), Math.round(fx.y));
+      ctx.restore();
+    }
+  }
+
+  // Clima: lluvia o copos suaves de nieve en Invierno
   if (state.weather === 'rain' || state.weather === 'storm' || state.weather === 'thunderstorm') {
     ctx.fillStyle = state.weather === 'thunderstorm' ? '#dbeafe' : state.weather === 'storm' ? '#bfdbfe' : '#93c5fd';
     for (const d of state.rainDrops) {
@@ -3526,13 +3966,22 @@ export function renderWorld(
       d.y += d.s * Math.max(1, state.speed);
       if (d.y > CANVAS_HEIGHT) d.y = 0;
     }
+  } else if (state.season === 'Invierno') {
+    ctx.fillStyle = 'rgba(248, 250, 252, 0.72)';
+    for (let i = 0; i < 45; i++) {
+      const sx = ((i * 71 + Math.floor(animPhase * 12)) % CANVAS_WIDTH);
+      const sy = ((i * 53 + Math.floor(animPhase * 20)) % CANVAS_HEIGHT);
+      ctx.fillRect(sx, sy, 2, 2);
+    }
   }
 
+  // Iluminación nocturna cálida con halos radiales o tinte de amanecer/atardecer
   if (isNight) {
-    ctx.fillStyle = 'rgba(10, 18, 42, 0.30)';
+    ctx.fillStyle = 'rgba(8, 15, 36, 0.36)';
     ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
 
-    ctx.fillStyle = 'rgba(253, 224, 71, 0.22)';
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
     if (state.plaza) {
       const plazaCorners = [
         [state.plaza.x - 52, state.plaza.y - 38],
@@ -3541,14 +3990,46 @@ export function renderWorld(
         [state.plaza.x + 48, state.plaza.y + 34],
       ];
       for (const [lx, ly] of plazaCorners) {
-        ctx.fillRect(lx - 14, ly - 14, 28, 28);
+        drawWarmHalo(ctx, lx + 2, ly - 1, 34, 'rgba(253, 224, 71, 0.34)');
       }
     }
     for (const r of state.roads) {
-      if (r.lit && (r.x + r.y) % 48 === 0) {
-        ctx.fillRect(r.x - 10, r.y - 22, 28, 28);
+      if (r.lit && (r.hasLamp || (r.x + r.y) % 48 === 0)) {
+        drawWarmHalo(ctx, r.x + 8, r.y - 10, 30, 'rgba(253, 224, 71, 0.30)');
       }
     }
+    for (const h of state.houses) {
+      if (occupiedHouseIds.has(h.id)) {
+        drawWarmHalo(ctx, h.x, h.y + 2, 26, 'rgba(251, 191, 36, 0.24)');
+      }
+    }
+    for (const b of state.specialBuildings) {
+      if (!b.isOperational) continue;
+      if (b.type === 'forge' || b.type === 'bakery' || b.type === 'apothecary') {
+        drawWarmHalo(
+          ctx,
+          b.x,
+          b.y + 2,
+          36,
+          b.type === 'forge' ? 'rgba(249, 115, 22, 0.34)' : 'rgba(251, 191, 36, 0.28)'
+        );
+      }
+    }
+    for (const fire of state.fires) {
+      drawWarmHalo(ctx, fire.x, fire.y - 4, 42, 'rgba(249, 115, 22, 0.42)');
+    }
+    for (const ag of state.agents) {
+      if (ag.job === 'Minero') {
+        drawWarmHalo(ctx, ag.x, ag.y - 12, 20, 'rgba(254, 240, 138, 0.24)');
+      }
+    }
+    ctx.restore();
+  } else if (state.minute >= 350 && state.minute <= 460) {
+    ctx.fillStyle = 'rgba(251, 146, 60, 0.08)';
+    ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+  } else if (state.minute >= 1030 && state.minute <= 1150) {
+    ctx.fillStyle = 'rgba(249, 115, 22, 0.11)';
+    ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
   } else if (state.weather === 'drought') {
     ctx.fillStyle = 'rgba(217, 119, 6, 0.12)';
     ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
@@ -3571,47 +4052,42 @@ export async function askQwenAssistant(
 ): Promise<{ reply: string; appliedRules: string[]; source: 'ollama' | 'local' }> {
   const agentNames = state.agents.map((a) => a.name);
 
+  const localResult = interpretQwenDirective(userPrompt, agentNames, state);
+  const queryCheck = queryVillageData(state, userPrompt);
+
   if (state.ollama.enabled && state.ollama.url.trim()) {
     try {
-      const villageSummary = {
-        dia: state.day,
-        estacion: state.season,
-        era: ERA_METADATA[state.era].label,
-        poblacion: state.agents.length,
-        enfermos: state.agents.filter((a) => a.isSick).length,
-        casas: state.houses.length,
-        plazaConstruida: Boolean(state.plaza),
-        puenteConstruido: Boolean(state.bridge),
-        cultivos: state.farms.length,
-        incendios: state.fires.length,
-        leyesActivas: state.laws.filter((l) => l.active).map((l) => l.name),
-        reservaEconomica: state.economyReserve,
-        conocimiento: Math.round(state.knowledge),
-        aldeanosMuestra: agentNames.slice(0, 15),
-      };
+      const villageSummary = buildQwenVillageTelemetry(state);
 
-      const systemPrompt = `Eres Qwen 2.5, IA dominante de la evolución de la especie y la aldea en "Aldea IA".
-Estado actual: ${JSON.stringify(villageSummary)}.
-Orden del jugador: "${userPrompt}".
+      const systemPrompt = `Eres Qwen 2.5, IA con control TOTAL sobre "Aldea IA" para consultar/recopilar datos reales e imponer órdenes en toda la aldea.
+Datos completos en tiempo real de la aldea: ${JSON.stringify(villageSummary)}.
+Orden o pregunta del jugador: "${userPrompt}".
 Responde EXCLUSIVAMENTE un JSON válido con:
 {
-  "reply": "Respuesta corta en español explicando lo ejecutado en los aldeanos",
+  "reply": "Respuesta clara en español con datos reales o confirmación exacta de lo ejecutado",
   "actions": [
+    { "type": "ASSIGN_ACTIVE_JOBS", "preferredJob": "Panadero|Minero|Constructor|Carpintero|...", "fraction": 0.5, "count": 5, "fromJob": "...", "forceChange": true },
+    { "type": "DIRECT_VILLAGER", "agentName": "Nombre", "job": "...", "action": "heal|build|trade|research|switch_partner|fish|store_home" },
+    { "type": "GRANT_VILLAGER_ITEMS", "resource": "gold|silver|coins|food|wood|stone|iron|copper|medicine|tools", "amount": 5, "targetName": "opcional" },
+    { "type": "ADJUST_STAT", "stat": "knowledge|health|energy|happiness", "delta": 20, "targetName": "opcional" },
+    { "type": "SET_WEATHER_BIOME", "weather": "sunny|rain|drought|storm|thunderstorm", "biome": "grassland|arid|forest|tundra", "season": "Primavera|Verano|Otoño|Invierno" },
+    { "type": "RELEASE_PRISONERS" },
     { "type": "GENERATE_ECONOMY" },
     { "type": "ISSUE_BANK_LOANS" },
     { "type": "FORM_MENTORSHIPS" },
     { "type": "REPAIR_BUILDINGS" },
     { "type": "RUN_CARAVANS" },
-    { "type": "TRIGGER_LIGHTNING_STORM" },
-    { "type": "TRIGGER_FIRE" },
+    { "type": "BUILD_HOUSES", "count": 2, "zone": "south|north" },
+    { "type": "BUILD_PLAZA" },
+    { "type": "BUILD_BRIDGE" },
     { "type": "BUILD_SPECIAL", "buildingType": "dock|bank|market|bakery|carpentry|forge|apothecary|infirmary|school|general_depot|town_hall|police_station|prison" },
     { "type": "TOGGLE_LAW", "lawId": "ban_trade_wood|ban_fishing|ban_trade_bread|ban_mine_gold|winter_rationing|night_watch|mining_priority", "active": true },
-    { "type": "ASSIGN_ACTIVE_JOBS" },
     { "type": "BOOST_EVOLUTION", "knowledgeGain": 45 },
-    { "type": "HEAL_VILLAGERS" }
+    { "type": "HEAL_VILLAGERS" },
+    { "type": "REPORT_DATA", "answer": "si solo es pregunta/consulta sin modificar nada" }
   ]
 }
-Usa solo las acciones relevantes para cumplir la orden.`;
+Si es una pregunta de datos (ej. posibles trabajadores), usa los números exactos de posiblesTrabajadoresPorEdificio y retorna { "type": "REPORT_DATA", "answer": "..." }. Si es una orden de cambio, incluye siempre las acciones exactas.`;
 
       const res = await fetch(state.ollama.url, {
         method: 'POST',
@@ -3629,9 +4105,46 @@ Usa solo las acciones relevantes para cumplir la orden.`;
         const raw = typeof data?.response === 'string' ? data.response : '';
         const parsed = JSON.parse(raw) as { reply?: string; actions?: QwenAction[] };
         if (parsed && Array.isArray(parsed.actions)) {
-          const appliedRules = applyQwenActions(state, parsed.actions, spawnSettlers);
+          if (queryCheck.matched) {
+            return {
+              reply: queryCheck.reply,
+              appliedRules: queryCheck.details,
+              source: 'ollama',
+            };
+          }
+          // Respaldo de autoridad: si Ollama devolvió acciones vacías, REPORT_DATA ante una orden real, o dejó fuera parámetros clave de cambio de trabajo/clima/riqueza, fusionar las acciones determinísticas locales
+          const localHasMassJob = localResult.actions.some(
+            (a) => a.type === 'ASSIGN_ACTIVE_JOBS' && (a.fraction !== undefined || a.count !== undefined || a.forceChange)
+          );
+          const ollamaHasCompleteJob = parsed.actions.some(
+            (a) => a.type === 'ASSIGN_ACTIVE_JOBS' && (a.fraction !== undefined || a.count !== undefined || a.forceChange)
+          );
+          const meaningfulParsed = parsed.actions.filter((a) => a.type !== 'REPORT_DATA');
+          const parsedTypes = new Set(meaningfulParsed.map((a) => a.type));
+          const missingLocalActions = localResult.actions.filter(
+            (a) => a.type !== 'REPORT_DATA' && !parsedTypes.has(a.type)
+          );
+
+          let finalActions: QwenAction[];
+          if (meaningfulParsed.length === 0) {
+            finalActions = localResult.actions;
+          } else if (localHasMassJob && !ollamaHasCompleteJob) {
+            finalActions = [
+              ...meaningfulParsed.filter((a) => a.type !== 'ASSIGN_ACTIVE_JOBS'),
+              ...localResult.actions.filter((a) => a.type === 'ASSIGN_ACTIVE_JOBS' || a.type === 'SET_POLICIES'),
+              ...missingLocalActions.filter((a) => a.type !== 'ASSIGN_ACTIVE_JOBS' && a.type !== 'SET_POLICIES'),
+            ];
+          } else {
+            finalActions = [...meaningfulParsed, ...missingLocalActions];
+          }
+
+          const appliedRules = applyQwenActions(state, finalActions, spawnSettlers);
+          const replyText =
+            appliedRules.length > 0 && parsed.reply
+              ? parsed.reply
+              : localResult.reply;
           return {
-            reply: parsed.reply || 'Reglas ejecutadas por Ollama (Qwen 2.5).',
+            reply: replyText,
             appliedRules,
             source: 'ollama',
           };
@@ -3642,7 +4155,14 @@ Usa solo las acciones relevantes para cumplir la orden.`;
     }
   }
 
-  const localResult = interpretQwenDirective(userPrompt, agentNames);
+  if (queryCheck.matched) {
+    return {
+      reply: queryCheck.reply,
+      appliedRules: queryCheck.details,
+      source: 'local',
+    };
+  }
+
   const appliedRules = applyQwenActions(state, localResult.actions, spawnSettlers);
   return {
     reply: localResult.reply,

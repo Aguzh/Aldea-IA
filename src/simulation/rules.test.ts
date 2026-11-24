@@ -93,6 +93,7 @@ import {
   PLAZA_COSTS,
   PREGNANCY_DAYS,
   progressDiseasesDaily,
+  queryVillageData,
   rebalanceBuildingOwnership,
   rebalanceFamilyHousing,
   repairDamagedStructures,
@@ -123,7 +124,7 @@ import {
   WORLD_CENTER_Y,
 } from './rules';
 import type { DiseaseInfo } from '../types/simulation';
-import { createAgent, createInitialState, spawnResource, spawnSettlers, tickSimulation } from './engine';
+import { createAgent, createInitialState, pushFloatingEffect, spawnResource, spawnSettlers, tickSimulation } from './engine';
 
 test('El juego inicia con 5 mujeres, 5 hombres, recursos finitos y sin ninguna construcción previa', () => {
   const state = createInitialState();
@@ -309,8 +310,9 @@ test('Pareja desde 15 años, reproducción desde 20 solo con wantsChildren, emba
   const day3Res = advanceDayAging(state);
   assert.equal(day3Res.births, 1);
   assert.equal(f1.pregnancy, null);
-  assert.equal(state.agents.length, popBefore + 1);
-  const newborn = state.agents[state.agents.length - 1];
+  assert.equal(state.agents.length, popBefore + day3Res.births - day3Res.diedOfOldAge);
+  const newborn = state.agents.find((a) => a.ageYears === 0)!;
+  assert.ok(newborn);
   assert.equal(newborn.ageYears, 0);
   assert.ok(newborn.lastQwenDecision?.includes('Qwen 2.5'));
 
@@ -1070,5 +1072,128 @@ test('Qwen Responde: automático cada 30 min cuando está activo, manual cuando 
   assert.ok(resPos.includes('Fue Escuchado'));
   assert.ok(directState.agents[0].happiness >= happyPosBefore);
 });
+
+test('Efectos visuales flotantes: creación, tope de 24 elementos y expiración por ttl en tickSimulation', () => {
+  const state = createInitialState();
+  state.agents = [];
+  assert.equal(state.floatingEffects.length, 0);
+
+  for (let i = 0; i < 30; i++) {
+    pushFloatingEffect(state, 100 + i, 200, `+${i} 🪵`, '#34d399', 1.2);
+  }
+  assert.equal(state.floatingEffects.length, 24);
+  assert.equal(state.floatingEffects[0].text, '+6 🪵');
+  assert.equal(state.floatingEffects[23].text, '+29 🪵');
+
+  tickSimulation(state, 0.5);
+  assert.equal(state.floatingEffects.length, 24);
+  assert.ok(state.floatingEffects[0].ttl < 1.2);
+
+  tickSimulation(state, 1.0);
+  assert.equal(state.floatingEffects.length, 0);
+});
+
+test('Qwen 2.5 control total: cambio real de trabajo de la mitad/cantidad, clima, riqueza y consulta de posibles trabajadores de panadería', () => {
+  const state = createInitialState();
+  const names = state.agents.map((a) => a.name);
+  const initialJobs = state.agents.map((a) => a.job);
+
+  // 1) Consulta de datos en tiempo real: NO debe mutar ningún oficio
+  const queryText = 'dame la cantidad total de posibles trabajadores de panaderia';
+  const queryRes = queryVillageData(state, queryText);
+  assert.equal(queryRes.matched, true);
+  assert.ok(queryRes.reply.includes('10'));
+  assert.ok(queryRes.reply.toLowerCase().includes('panader'));
+
+  const interpretedQuery = interpretQwenDirective(queryText, names, state);
+  assert.equal(interpretedQuery.actions.length, 1);
+  assert.equal(interpretedQuery.actions[0].type, 'REPORT_DATA');
+  applyQwenActions(state, interpretedQuery.actions);
+  assert.deepEqual(
+    state.agents.map((a) => a.job),
+    initialJobs
+  );
+
+  // 2) Orden real: "cambia el trabajo de la mitad de los pobladores"
+  const halfJobCmd = interpretQwenDirective(
+    'cambia el trabajo de la mitad de los pobladores',
+    names,
+    state
+  );
+  const appliedHalf = applyQwenActions(state, halfJobCmd.actions);
+  const changedCount = state.agents.filter((a, idx) => a.job !== initialJobs[idx]).length;
+  assert.equal(changedCount, 5);
+  assert.ok(appliedHalf.some((line) => line.includes('Cambiados 5/10')));
+
+  // 3) Orden específica: "cambia 3 aldeanos a panadero"
+  const bakerCmd = interpretQwenDirective('cambia 3 aldeanos a panadero', names, state);
+  applyQwenActions(state, bakerCmd.actions);
+  assert.ok(state.agents.filter((a) => a.job === 'Panadero').length >= 3);
+
+  // Consulta nuevamente debe reflejar los Panaderos activos actualizados sin alterar oficios
+  const queryAfter = queryVillageData(state, 'cantidad total de posibles trabajadores de panaderia');
+  assert.equal(queryAfter.matched, true);
+  assert.ok(queryAfter.reply.includes('Ya ejercen ese oficio:'));
+  assert.ok(!queryAfter.reply.includes('Ya ejercen ese oficio: 0'));
+
+  // 4) Imposición directa de clima y riqueza
+  const weatherCmd = interpretQwenDirective('cambia el clima a lluvia', names, state);
+  applyQwenActions(state, weatherCmd.actions);
+  assert.equal(state.weather, 'rain');
+
+  const goldBefore = state.economyReserve.goldReserve;
+  const wealthCmd = interpretQwenDirective('agrega 3 oro al pueblo', names, state);
+  applyQwenActions(state, wealthCmd.actions);
+  assert.equal(state.economyReserve.goldReserve, goldBefore + 3);
+});
+
+test('Petición del Representante: "No fue Escuchado" la ignora por completo y "Fue Escuchado" cumple la riqueza/efectos en toda AldeaIA', () => {
+  // 1) "No fue Escuchado" ignora totalmente la entrega de riqueza/oro/monedas
+  const ignoredState = createInitialState();
+  const petIgnored = createVillagePetition(ignoredState, false, 'wealth')!;
+  assert.ok(petIgnored);
+  assert.equal(petIgnored.effectType, 'wealth');
+
+  const goldBeforeIgn = ignoredState.economyReserve.goldReserve;
+  const silverBeforeIgn = ignoredState.economyReserve.silverReserve;
+  const coinsBeforeIgn = ignoredState.agents.reduce((s, a) => s + a.coins, 0);
+  const poolBeforeIgn = ignoredState.economyReserve.bankLoanPool;
+  const happyBeforeIgn = ignoredState.agents[0].happiness;
+
+  resolvePetition(ignoredState, false, 'Jugador');
+  assert.equal(ignoredState.economyReserve.goldReserve, goldBeforeIgn);
+  assert.equal(ignoredState.economyReserve.silverReserve, silverBeforeIgn);
+  assert.equal(
+    ignoredState.agents.reduce((s, a) => s + a.coins, 0),
+    coinsBeforeIgn
+  );
+  assert.equal(ignoredState.economyReserve.bankLoanPool, poolBeforeIgn);
+  assert.ok(ignoredState.agents[0].happiness < happyBeforeIgn);
+
+  // 2) "Fue Escuchado" cumple concretamente el pedido de riqueza en toda la aldea + mejora emocional y de salud
+  const heardState = createInitialState();
+  const petHeard = createVillagePetition(heardState, false, 'wealth')!;
+  assert.equal(petHeard.effectType, 'wealth');
+
+  const goldBefore = heardState.economyReserve.goldReserve;
+  const silverBefore = heardState.economyReserve.silverReserve;
+  const coinsBefore = heardState.agents.reduce((s, a) => s + a.coins, 0);
+  const poolBefore = heardState.economyReserve.bankLoanPool;
+  heardState.agents[0].happiness = 60;
+  heardState.agents[0].health = 80;
+
+  resolvePetition(heardState, true, 'Jugador');
+  assert.equal(heardState.economyReserve.goldReserve, goldBefore + 2);
+  assert.equal(heardState.economyReserve.silverReserve, silverBefore + 1);
+  assert.equal(
+    heardState.agents.reduce((s, a) => s + a.coins, 0),
+    coinsBefore + heardState.agents.length * 6
+  );
+  assert.equal(heardState.economyReserve.bankLoanPool, poolBefore + 15);
+  assert.ok(heardState.agents[0].happiness > 60);
+  assert.ok(heardState.agents[0].health > 80);
+});
+
+
 
 
