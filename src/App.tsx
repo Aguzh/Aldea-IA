@@ -11,6 +11,7 @@ import {
 import {
   addLog,
   addRoadTile,
+  ALL_JOBS,
   ANIMAL_LABELS,
   buildBaseRoads,
   CANVAS_HEIGHT,
@@ -165,14 +166,98 @@ function readSavedSummary(): { exists: boolean; info: string | null } {
   }
 }
 
+function finiteOr(val: unknown, fallback: number): number {
+  const n = typeof val === 'number' ? val : Number(val);
+  return Number.isFinite(n) ? n : fallback;
+}
+
 export function hydrateSimulationState(parsed: Partial<SimulationState>): SimulationState {
   const base = createInitialState();
-  const parsedDay = parsed.day ?? 1;
+  const parsedDay = Math.max(1, Math.round(finiteOr(parsed.day, 1)));
+  const validSpeed = parsed.speed === 0 || parsed.speed === 1 || parsed.speed === 2 || parsed.speed === 4 ? parsed.speed : 1;
+  const rawPolicies = (parsed.policies && typeof parsed.policies === 'object' ? parsed.policies : {}) as Partial<SimulationState['policies']>;
+  const safePolicies: SimulationState['policies'] = {
+    buildPriority: typeof rawPolicies.buildPriority === 'boolean' ? rawPolicies.buildPriority : base.policies.buildPriority,
+    workFocus: typeof rawPolicies.workFocus === 'boolean' ? rawPolicies.workFocus : base.policies.workFocus,
+    evolutionFocus: typeof rawPolicies.evolutionFocus === 'boolean' ? rawPolicies.evolutionFocus : base.policies.evolutionFocus,
+    economyFocus: typeof rawPolicies.economyFocus === 'boolean' ? rawPolicies.economyFocus : base.policies.economyFocus,
+    farmingFocus: typeof rawPolicies.farmingFocus === 'boolean' ? rawPolicies.farmingFocus : base.policies.farmingFocus,
+    reproductionRestraint:
+      typeof rawPolicies.reproductionRestraint === 'boolean'
+        ? rawPolicies.reproductionRestraint
+        : base.policies.reproductionRestraint,
+    healthPriority: typeof rawPolicies.healthPriority === 'boolean' ? rawPolicies.healthPriority : base.policies.healthPriority,
+    allowPartnerSwitch:
+      typeof rawPolicies.allowPartnerSwitch === 'boolean'
+        ? rawPolicies.allowPartnerSwitch
+        : base.policies.allowPartnerSwitch,
+    moodDirective:
+      rawPolicies.moodDirective === 'optimistic' || rawPolicies.moodDirective === 'disciplined'
+        ? rawPolicies.moodDirective
+        : 'neutral',
+  };
+
   const nextState: SimulationState = {
     ...base,
-    ...parsed,
+    day: parsedDay,
+    minute: clamp(finiteOr(parsed.minute, base.minute), 0, 1440),
+    speed: validSpeed,
+    resourcesPaused: Boolean(parsed.resourcesPaused),
+    layoutMode:
+      parsed.layoutMode === 'vertical' || parsed.layoutMode === 'horizontal' ? parsed.layoutMode : 'auto',
+    biome:
+      parsed.biome === 'grassland' || parsed.biome === 'arid' || parsed.biome === 'forest' || parsed.biome === 'tundra'
+        ? parsed.biome
+        : base.biome,
+    weather:
+      parsed.weather === 'sunny' ||
+      parsed.weather === 'rain' ||
+      parsed.weather === 'drought' ||
+      parsed.weather === 'storm' ||
+      parsed.weather === 'thunderstorm'
+        ? parsed.weather
+        : base.weather,
+    era: parsed.era ?? base.era,
+    tool: parsed.tool ?? 'inspect',
+    knowledge: Math.max(0, finiteOr(parsed.knowledge, base.knowledge)),
+    nextId: Math.max(100, Math.round(finiteOr(parsed.nextId, base.nextId))),
+    policies: safePolicies,
+    ollama:
+      parsed.ollama && typeof parsed.ollama === 'object'
+        ? {
+            enabled: Boolean(parsed.ollama.enabled),
+            url: typeof parsed.ollama.url === 'string' ? parsed.ollama.url : base.ollama.url,
+            model: typeof parsed.ollama.model === 'string' ? parsed.ollama.model : base.ollama.model,
+          }
+        : base.ollama,
+    history: Array.isArray(parsed.history) ? parsed.history.slice(-120) : [],
+    logs: Array.isArray(parsed.logs)
+      ? parsed.logs
+          .filter((l) => l && typeof l.text === 'string')
+          .slice(0, 80)
+          .map((l, idx) => ({
+            id: Math.round(finiteOr(l.id, idx + 1)),
+            day: Math.max(1, Math.round(finiteOr(l.day, parsedDay))),
+            text: String(l.text),
+            tone: l.tone ?? 'slate',
+          }))
+      : base.logs,
+    qwenMessages: Array.isArray(parsed.qwenMessages)
+      ? parsed.qwenMessages
+          .filter((m) => m && typeof m === 'object')
+          .slice(-35)
+          .map((m, idx) => ({
+            id: Math.round(finiteOr(m.id, idx + 1)),
+            role: m.role === 'user' ? 'user' : 'qwen',
+            text: typeof m.text === 'string' ? m.text : 'Mensaje recuperado',
+            appliedRules: Array.isArray(m.appliedRules)
+              ? m.appliedRules.filter((r): r is string => typeof r === 'string')
+              : undefined,
+            source: m.source === 'ollama' ? 'ollama' : 'local',
+          }))
+      : base.qwenMessages,
     selectedEntity: null,
-    selectedAgentId: parsed.selectedAgentId ?? null,
+    selectedAgentId: typeof parsed.selectedAgentId === 'number' ? parsed.selectedAgentId : null,
     selectedRoadType: parsed.selectedRoadType ?? 'dirt',
     selectedRoadLamp: parsed.selectedRoadLamp ?? false,
     roadMaintenanceLastDay: parsed.roadMaintenanceLastDay ?? parsedDay,
@@ -279,39 +364,61 @@ export function hydrateSimulationState(parsed: Partial<SimulationState>): Simula
           restTimer: r.restTimer ?? 0,
         }))
       : [],
-    agents: Array.isArray(parsed.agents)
-      ? parsed.agents.map((a) => {
-          const edu = a.education ?? 12;
-          return {
-            ...a,
-            education: edu,
-            carpentryKnowledge: a.carpentryKnowledge ?? 8,
-            constructionKnowledge: a.constructionKnowledge ?? 12,
-            jobMastery: a.jobMastery ?? {},
-            skills: Array.isArray(a.skills) ? a.skills : computeUnlockedSkills(edu).map((sk) => sk.id),
-            mentorId: a.mentorId ?? null,
-            loanDebt: a.loanDebt ?? 0,
-            jailedDays: a.jailedDays ?? 0,
-            isRepresentative: a.isRepresentative ?? false,
-            wantsChildren: a.wantsChildren ?? true,
-            pregnancy: a.pregnancy ?? null,
-            illness: a.illness ?? null,
-            assignedBuildingId: a.assignedBuildingId ?? null,
-            activeConstruction: a.activeConstruction ?? null,
-            inv: {
-              food: a.inv?.food ?? 0,
-              wood: a.inv?.wood ?? 0,
-              pineWood: a.inv?.pineWood ?? 0,
-              mapleWood: a.inv?.mapleWood ?? 0,
-              oakWood: a.inv?.oakWood ?? 0,
-              stone: a.inv?.stone ?? 0,
-              copper: a.inv?.copper ?? 0,
-              iron: a.inv?.iron ?? 0,
-              gold: a.inv?.gold ?? 0,
-              silver: a.inv?.silver ?? 0,
-            },
-          };
-        })
+    agents: Array.isArray(parsed.agents) && parsed.agents.length > 0
+      ? parsed.agents
+          .filter((a) => a && typeof a === 'object')
+          .map((a, idx) => {
+            const edu = clamp(finiteOr(a.education, 12), 0, 100);
+            const validJob = ALL_JOBS.includes(a.job) ? a.job : 'Recolector';
+            return {
+              ...a,
+              id: Math.round(finiteOr(a.id, idx + 1)),
+              name: typeof a.name === 'string' && a.name.trim() ? a.name : `Aldeano ${idx + 1}`,
+              sex: a.sex === 'F' ? 'F' : 'M',
+              x: clamp(finiteOr(a.x, CANVAS_WIDTH * 0.5), 20, CANVAS_WIDTH - 20),
+              y: clamp(finiteOr(a.y, CANVAS_HEIGHT * 0.65), 20, CANVAS_HEIGHT - 20),
+              ageYears: Math.max(0, Math.round(finiteOr(a.ageYears, 20))),
+              health: clamp(finiteOr(a.health, 95), 1, 100),
+              energy: clamp(finiteOr(a.energy, 85), 0, 100),
+              hunger: clamp(finiteOr(a.hunger, 15), 0, 100),
+              happiness: clamp(finiteOr(a.happiness, 75), 0, 100),
+              coins: Math.max(0, Math.round(finiteOr(a.coins, 0))),
+              job: validJob,
+              activity: typeof a.activity === 'string' ? a.activity : 'Trabajando',
+              thought: typeof a.thought === 'string' ? a.thought : 'Buscando el progreso de la aldea.',
+              qwenPlan: typeof a.qwenPlan === 'string' ? a.qwenPlan : 'Progreso de la aldea',
+              reproductionCooldown: Math.max(0, finiteOr(a.reproductionCooldown, 0)),
+              education: edu,
+              carpentryKnowledge: clamp(finiteOr(a.carpentryKnowledge, 8), 0, 100),
+              constructionKnowledge: clamp(finiteOr(a.constructionKnowledge, 12), 0, 100),
+              jobMastery: a.jobMastery && typeof a.jobMastery === 'object' ? a.jobMastery : {},
+              skills: Array.isArray(a.skills) ? a.skills : computeUnlockedSkills(edu).map((sk) => sk.id),
+              mentorId: a.mentorId ?? null,
+              loanDebt: Math.max(0, finiteOr(a.loanDebt, 0)),
+              jailedDays: Math.max(0, Math.round(finiteOr(a.jailedDays, 0))),
+              isRepresentative: Boolean(a.isRepresentative),
+              wantsChildren: typeof a.wantsChildren === 'boolean' ? a.wantsChildren : true,
+              pregnancy:
+                a.pregnancy && typeof a.pregnancy === 'object' && Number.isFinite(a.pregnancy.daysRemaining)
+                  ? a.pregnancy
+                  : null,
+              illness: a.illness ?? null,
+              assignedBuildingId: typeof a.assignedBuildingId === 'number' ? a.assignedBuildingId : null,
+              activeConstruction: a.activeConstruction ?? null,
+              inv: {
+                food: Math.max(0, finiteOr(a.inv?.food, 0)),
+                wood: Math.max(0, finiteOr(a.inv?.wood, 0)),
+                pineWood: Math.max(0, finiteOr(a.inv?.pineWood, 0)),
+                mapleWood: Math.max(0, finiteOr(a.inv?.mapleWood, 0)),
+                oakWood: Math.max(0, finiteOr(a.inv?.oakWood, 0)),
+                stone: Math.max(0, finiteOr(a.inv?.stone, 0)),
+                copper: Math.max(0, finiteOr(a.inv?.copper, 0)),
+                iron: Math.max(0, finiteOr(a.inv?.iron, 0)),
+                gold: Math.max(0, finiteOr(a.inv?.gold, 0)),
+                silver: Math.max(0, finiteOr(a.inv?.silver, 0)),
+              },
+            };
+          })
       : base.agents,
     highlightFamilyAgentId: parsed.highlightFamilyAgentId ?? null,
     houses: Array.isArray(parsed.houses)
@@ -413,12 +520,16 @@ export default function App() {
         const res = await fetch('/api/state');
         if (res.ok) {
           const data = (await res.json()) as { state?: Partial<SimulationState> | null };
-          if (active && data?.state && Array.isArray(data.state.agents)) {
-            stateRef.current = hydrateSimulationState(data.state);
-            setServerSyncStatus(`Restaurado del servidor (Día ${stateRef.current.day})`);
-            hydratedRef.current = true;
-            syncUI();
-            return;
+          if (active && data?.state && Array.isArray(data.state.agents) && data.state.agents.length > 0) {
+            try {
+              stateRef.current = hydrateSimulationState(data.state);
+              setServerSyncStatus(`Restaurado del servidor (Día ${stateRef.current.day})`);
+              hydratedRef.current = true;
+              syncUI();
+              return;
+            } catch {
+              // Ignorar estado corrupto en servidor y continuar con respaldo local o inicio limpio
+            }
           }
         }
       } catch {
@@ -429,14 +540,15 @@ export default function App() {
         const raw = localStorage.getItem(SAVE_STORAGE_KEY);
         if (raw) {
           const parsed = JSON.parse(raw) as Partial<SimulationState>;
-          if (parsed && Array.isArray(parsed.agents)) {
+          if (parsed && Array.isArray(parsed.agents) && parsed.agents.length > 0) {
             stateRef.current = hydrateSimulationState(parsed);
             setServerSyncStatus(`Restaurado local (Día ${stateRef.current.day})`);
             syncUI();
           }
         }
       } catch {
-        // Ignorar
+        stateRef.current = createInitialState();
+        syncUI();
       }
       hydratedRef.current = true;
     })();
@@ -1284,26 +1396,37 @@ export default function App() {
     s.qwenMessages.push({
       id: s.nextId++,
       role: 'user',
-      text,
+      text: String(text),
       source: s.ollama.enabled ? 'ollama' : 'local',
     });
     setIsQwenBusy(true);
     syncUI();
 
-    const response = await askQwenAssistant(s, text);
-    s.qwenMessages.push({
-      id: s.nextId++,
-      role: 'qwen',
-      text: response.reply,
-      appliedRules: response.appliedRules,
-      source: response.source,
-    });
-    if (s.qwenMessages.length > 35) {
-      s.qwenMessages = s.qwenMessages.slice(-35);
+    try {
+      const response = await askQwenAssistant(s, text);
+      s.qwenMessages.push({
+        id: s.nextId++,
+        role: 'qwen',
+        text: typeof response.reply === 'string' ? response.reply : 'Orden procesada en la aldea.',
+        appliedRules: Array.isArray(response.appliedRules) ? response.appliedRules : [],
+        source: response.source === 'ollama' ? 'ollama' : 'local',
+      });
+      if (s.qwenMessages.length > 35) {
+        s.qwenMessages = s.qwenMessages.slice(-35);
+      }
+      void saveStateToServer(true);
+    } catch {
+      s.qwenMessages.push({
+        id: s.nextId++,
+        role: 'qwen',
+        text: 'Se protegió el sistema ante una respuesta inesperada; la aldea continúa funcionando.',
+        appliedRules: [],
+        source: 'local',
+      });
+    } finally {
+      setIsQwenBusy(false);
+      syncUI();
     }
-    setIsQwenBusy(false);
-    void saveStateToServer(true);
-    syncUI();
   }
 
   function handleSaveOllama(next: OllamaConfig) {

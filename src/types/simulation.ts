@@ -628,7 +628,7 @@ export type QwenAction =
   | { type: 'KILL_CROPS' }
   | { type: 'ADD_ROADS'; roadType?: RoadType; withLamp?: boolean }
   | { type: 'GENERATE_ECONOMY' }
-  | { type: 'ALLOW_MORE_VILLAGERS'; spawnCount?: number }
+  | { type: 'ALLOW_MORE_VILLAGERS'; spawnCount?: number; encouragePregnancies?: boolean }
   | {
       type: 'ASSIGN_ACTIVE_JOBS';
       preferredJob?: JobType;

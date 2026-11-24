@@ -209,7 +209,15 @@ async function startServer() {
   app.post('/api/state', (req, res) => {
     try {
       const payload = req.body && typeof req.body === 'object' && 'state' in req.body ? req.body.state : req.body;
-      if (!payload || !Array.isArray(payload.agents) || !Array.isArray(payload.houses)) {
+      if (
+        !payload ||
+        typeof payload !== 'object' ||
+        !Array.isArray(payload.agents) ||
+        payload.agents.length === 0 ||
+        !Array.isArray(payload.houses) ||
+        !Number.isFinite(Number(payload.day)) ||
+        !Number.isFinite(Number(payload.minute))
+      ) {
         res.status(400).json({ error: 'Estado de simulación inválido.' });
         return;
       }

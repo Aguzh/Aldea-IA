@@ -921,6 +921,30 @@ export function contractDiseaseForAgent(
   return info;
 }
 
+export const ALL_JOBS: readonly JobType[] = [
+  'Aprendiz',
+  'Recolector',
+  'Agricultor',
+  'Pescador',
+  'Leñador',
+  'Carpintero',
+  'Minero',
+  'Constructor',
+  'Curandero',
+  'Maestro',
+  'Erudito',
+  'Comerciante',
+  'Banquero',
+  'Panadero',
+  'Herrero',
+  'Artesano',
+  'Boticario',
+  'Guardián',
+  'Alcalde',
+  'Comisario',
+  'Almacenero',
+] as const;
+
 export function getAllJobsMap(): Record<JobType, number> {
   return {
     Aprendiz: 0,
@@ -5574,19 +5598,49 @@ export function interpretQwenDirective(
     summaryParts.push('activación de economía respaldada y comercios');
   }
 
+  const wantsMoreChildren =
+    (/\b(tener|tengan|tenga|hacer|hagan|quiero|permitir|permite|habilita|aumenta|subir|mas|fomentar)\b/.test(q) &&
+      /\b(hj?ij[oa]s?|bebes?|crias?|nacimientos?|natalidad|descendencia|embarazos?)\b/.test(q) &&
+      !q.includes('no reproduc') &&
+      !q.includes('menos hijo') &&
+      !q.includes('prohibir')) ||
+    /\b(reproduzcan|reproducirse|mas hj?ij[oa]s?)\b/.test(q);
+
   if (
+    wantsMoreChildren ||
     q.includes('permitir mas aldeano') ||
     q.includes('mas aldeano') ||
     q.includes('mas habitante') ||
     q.includes('crecer poblacion') ||
     q.includes('nuevos aldeano') ||
-    q.includes('sumar aldeano') ||
-    q.includes('tener mas hijo')
+    q.includes('sumar aldeano')
   ) {
     const spawnMatch = q.match(/(?:sumar|agregar|traer|nuevos?|invitar)\s*(\d+)/);
-    const spawnCount = spawnMatch ? clamp(Number(spawnMatch[1]), 1, 6) : 2;
-    actions.push({ type: 'ALLOW_MORE_VILLAGERS', spawnCount });
-    summaryParts.push(`expansión poblacional (+${spawnCount} colonos)`);
+    const mentionsSettlers =
+      q.includes('aldeano') ||
+      q.includes('habitante') ||
+      q.includes('colono') ||
+      q.includes('crecer poblacion') ||
+      Boolean(spawnMatch);
+    const spawnCount = spawnMatch
+      ? clamp(Number(spawnMatch[1]), 1, 6)
+      : wantsMoreChildren && !mentionsSettlers
+        ? 0
+        : wantsMoreChildren && q.includes('tengan')
+          ? 0
+          : 2;
+    actions.push({
+      type: 'ALLOW_MORE_VILLAGERS',
+      spawnCount,
+      encouragePregnancies: wantsMoreChildren,
+    });
+    summaryParts.push(
+      wantsMoreChildren
+        ? spawnCount > 0
+          ? `impulso a la natalidad (+${spawnCount} colonos)`
+          : 'impulso natural a la natalidad (embarazos y familias en la aldea)'
+        : `expansión poblacional (+${spawnCount} colonos)`
+    );
   }
 
   if (q.includes('enfermer') || q.includes('hospital') || q.includes('clinica')) {
@@ -5796,6 +5850,314 @@ export function interpretQwenDirective(
   };
 }
 
+const VALID_DIRECT_ACTIONS = new Set([
+  'heal',
+  'build',
+  'trade',
+  'research',
+  'switch_partner',
+  'fish',
+  'store_home',
+]);
+const VALID_ADD_RESOURCES = new Set(['food', 'wood', 'stone', 'copper', 'iron', 'gold', 'silver']);
+const VALID_GRANT_ITEMS = new Set([
+  'food',
+  'wood',
+  'pineWood',
+  'mapleWood',
+  'oakWood',
+  'stone',
+  'copper',
+  'iron',
+  'gold',
+  'silver',
+  'coins',
+  'bread',
+  'tools',
+  'medicine',
+]);
+const VALID_STATS = new Set(['knowledge', 'health', 'energy', 'happiness']);
+const VALID_WEATHERS = new Set<WeatherType>(['sunny', 'rain', 'drought', 'storm', 'thunderstorm']);
+const VALID_BIOMES = new Set<BiomeType>(['grassland', 'arid', 'forest', 'tundra']);
+const VALID_SEASONS = new Set<SeasonType>(['Primavera', 'Verano', 'Otoño', 'Invierno']);
+const VALID_LAW_IDS = new Set<VillageLawId>([
+  'ban_trade_wood',
+  'ban_fishing',
+  'ban_trade_bread',
+  'ban_mine_gold',
+  'winter_rationing',
+  'night_watch',
+  'mining_priority',
+]);
+
+function safeFiniteInt(val: unknown, fallback: number, min: number, max: number): number {
+  const n = typeof val === 'number' ? val : Number(val);
+  if (!Number.isFinite(n)) return fallback;
+  return clamp(Math.round(n), min, max);
+}
+
+function safeValidJob(val: unknown): JobType | undefined {
+  if (typeof val !== 'string') return undefined;
+  return ALL_JOBS.includes(val as JobType) ? (val as JobType) : undefined;
+}
+
+export function sanitizeQwenReply(rawReply: unknown, fallback: string): string {
+  if (typeof rawReply !== 'string') return fallback;
+  const trimmed = rawReply.trim();
+  if (!trimmed) return fallback;
+  return trimmed.slice(0, 600);
+}
+
+/**
+ * Sandbox estricto para acciones de Qwen 2.5:3b:
+ * Solo permite acciones válidas y acotadas dentro del mapa de la aldea.
+ * Bloquea parámetros inválidos, enumeraciones inventadas o alteraciones del sistema.
+ */
+export function sanitizeQwenActions(rawActions: unknown): QwenAction[] {
+  if (!Array.isArray(rawActions)) return [];
+  const safe: QwenAction[] = [];
+
+  for (const item of rawActions.slice(0, 16)) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const raw = item as Record<string, unknown>;
+    const type = raw.type;
+    if (typeof type !== 'string') continue;
+
+    switch (type) {
+      case 'BUILD_HOUSES':
+        safe.push({
+          type: 'BUILD_HOUSES',
+          count: safeFiniteInt(raw.count, 1, 1, 6),
+          zone: raw.zone === 'north' ? 'north' : 'south',
+        });
+        break;
+      case 'UPGRADE_HOUSES':
+        safe.push({
+          type: 'UPGRADE_HOUSES',
+          count: safeFiniteInt(raw.count, 1, 1, 6),
+        });
+        break;
+      case 'BUILD_PLAZA':
+        safe.push({ type: 'BUILD_PLAZA' });
+        break;
+      case 'BUILD_BRIDGE':
+        safe.push({ type: 'BUILD_BRIDGE' });
+        break;
+      case 'BUILD_SPECIAL':
+      case 'UPGRADE_SPECIAL': {
+        if (typeof raw.buildingType === 'string' && raw.buildingType in SPECIAL_BUILDING_COSTS) {
+          safe.push({ type, buildingType: raw.buildingType as SpecialBuildingType });
+        }
+        break;
+      }
+      case 'PLANT_CROPS':
+        safe.push({
+          type: 'PLANT_CROPS',
+          count: safeFiniteInt(raw.count, 1, 1, 6),
+          zone: raw.zone === 'north' ? 'north' : 'south',
+          farmSize:
+            raw.farmSize === 'small' || raw.farmSize === 'medium' || raw.farmSize === 'large'
+              ? raw.farmSize
+              : undefined,
+        });
+        break;
+      case 'KILL_CROPS':
+        safe.push({ type: 'KILL_CROPS' });
+        break;
+      case 'ADD_ROADS':
+        safe.push({
+          type: 'ADD_ROADS',
+          roadType:
+            raw.roadType === 'dirt' || raw.roadType === 'stone' || raw.roadType === 'reinforced'
+              ? raw.roadType
+              : undefined,
+          withLamp: typeof raw.withLamp === 'boolean' ? raw.withLamp : undefined,
+        });
+        break;
+      case 'GENERATE_ECONOMY':
+        safe.push({ type: 'GENERATE_ECONOMY' });
+        break;
+      case 'ALLOW_MORE_VILLAGERS': {
+        const hasSpawn = raw.spawnCount !== undefined;
+        safe.push({
+          type: 'ALLOW_MORE_VILLAGERS',
+          spawnCount: hasSpawn ? safeFiniteInt(raw.spawnCount, 0, 0, 6) : 0,
+          encouragePregnancies: typeof raw.encouragePregnancies === 'boolean' ? raw.encouragePregnancies : true,
+        });
+        break;
+      }
+      case 'ASSIGN_ACTIVE_JOBS': {
+        const preferredJob = safeValidJob(raw.preferredJob);
+        const fromJob = safeValidJob(raw.fromJob);
+        const rawFrac = typeof raw.fraction === 'number' && Number.isFinite(raw.fraction)
+          ? clamp(raw.fraction, 0.05, 1)
+          : undefined;
+        const rawCount = raw.count !== undefined ? safeFiniteInt(raw.count, 1, 1, 200) : undefined;
+        safe.push({
+          type: 'ASSIGN_ACTIVE_JOBS',
+          preferredJob,
+          fromJob,
+          fraction: rawFrac,
+          count: rawCount,
+          forceChange: typeof raw.forceChange === 'boolean' ? raw.forceChange : undefined,
+        });
+        break;
+      }
+      case 'DIRECT_VILLAGER': {
+        if (typeof raw.agentName !== 'string' || !raw.agentName.trim()) break;
+        const actionName =
+          typeof raw.action === 'string' && VALID_DIRECT_ACTIONS.has(raw.action)
+            ? (raw.action as NonNullable<Extract<QwenAction, { type: 'DIRECT_VILLAGER' }>['action']>)
+            : undefined;
+        safe.push({
+          type: 'DIRECT_VILLAGER',
+          agentName: raw.agentName.trim().slice(0, 60),
+          job: safeValidJob(raw.job),
+          action: actionName,
+        });
+        break;
+      }
+      case 'SPAWN_ANIMAL': {
+        if (typeof raw.animalType === 'string' && raw.animalType in ANIMAL_LABELS) {
+          safe.push({
+            type: 'SPAWN_ANIMAL',
+            animalType: raw.animalType as AnimalType,
+            count: safeFiniteInt(raw.count, 1, 1, 8),
+          });
+        }
+        break;
+      }
+      case 'BOOST_EVOLUTION':
+        safe.push({
+          type: 'BOOST_EVOLUTION',
+          knowledgeGain: safeFiniteInt(raw.knowledgeGain, 25, 1, 150),
+        });
+        break;
+      case 'SET_POLICIES': {
+        if (!raw.patch || typeof raw.patch !== 'object' || Array.isArray(raw.patch)) break;
+        const rawPatch = raw.patch as Record<string, unknown>;
+        const cleanPatch: Partial<QwenPolicyState> = {};
+        if (typeof rawPatch.buildPriority === 'boolean') cleanPatch.buildPriority = rawPatch.buildPriority;
+        if (typeof rawPatch.workFocus === 'boolean') cleanPatch.workFocus = rawPatch.workFocus;
+        if (typeof rawPatch.evolutionFocus === 'boolean') cleanPatch.evolutionFocus = rawPatch.evolutionFocus;
+        if (typeof rawPatch.economyFocus === 'boolean') cleanPatch.economyFocus = rawPatch.economyFocus;
+        if (typeof rawPatch.farmingFocus === 'boolean') cleanPatch.farmingFocus = rawPatch.farmingFocus;
+        if (typeof rawPatch.reproductionRestraint === 'boolean') {
+          cleanPatch.reproductionRestraint = rawPatch.reproductionRestraint;
+        }
+        if (typeof rawPatch.healthPriority === 'boolean') cleanPatch.healthPriority = rawPatch.healthPriority;
+        if (typeof rawPatch.allowPartnerSwitch === 'boolean') cleanPatch.allowPartnerSwitch = rawPatch.allowPartnerSwitch;
+        if (
+          rawPatch.moodDirective === 'neutral' ||
+          rawPatch.moodDirective === 'optimistic' ||
+          rawPatch.moodDirective === 'disciplined'
+        ) {
+          cleanPatch.moodDirective = rawPatch.moodDirective;
+        }
+        if (Object.keys(cleanPatch).length > 0) {
+          safe.push({ type: 'SET_POLICIES', patch: cleanPatch });
+        }
+        break;
+      }
+      case 'HEAL_VILLAGERS':
+        safe.push({ type: 'HEAL_VILLAGERS' });
+        break;
+      case 'ADD_VILLAGE_RESOURCES': {
+        if (typeof raw.resource === 'string' && VALID_ADD_RESOURCES.has(raw.resource)) {
+          safe.push({
+            type: 'ADD_VILLAGE_RESOURCES',
+            resource: raw.resource as Extract<QwenAction, { type: 'ADD_VILLAGE_RESOURCES' }>['resource'],
+            count: safeFiniteInt(raw.count, 3, 1, 12),
+          });
+        }
+        break;
+      }
+      case 'GRANT_VILLAGER_ITEMS': {
+        if (typeof raw.resource === 'string' && VALID_GRANT_ITEMS.has(raw.resource)) {
+          safe.push({
+            type: 'GRANT_VILLAGER_ITEMS',
+            resource: raw.resource as Extract<QwenAction, { type: 'GRANT_VILLAGER_ITEMS' }>['resource'],
+            amount: safeFiniteInt(raw.amount, 5, 1, 100),
+            targetName: typeof raw.targetName === 'string' ? raw.targetName.trim().slice(0, 60) : undefined,
+          });
+        }
+        break;
+      }
+      case 'ADJUST_STAT': {
+        if (typeof raw.stat === 'string' && VALID_STATS.has(raw.stat)) {
+          safe.push({
+            type: 'ADJUST_STAT',
+            stat: raw.stat as Extract<QwenAction, { type: 'ADJUST_STAT' }>['stat'],
+            delta: safeFiniteInt(raw.delta, 10, -50, 50),
+            targetName: typeof raw.targetName === 'string' ? raw.targetName.trim().slice(0, 60) : undefined,
+          });
+        }
+        break;
+      }
+      case 'SET_WEATHER_BIOME':
+        safe.push({
+          type: 'SET_WEATHER_BIOME',
+          weather:
+            typeof raw.weather === 'string' && VALID_WEATHERS.has(raw.weather as WeatherType)
+              ? (raw.weather as WeatherType)
+              : undefined,
+          biome:
+            typeof raw.biome === 'string' && VALID_BIOMES.has(raw.biome as BiomeType)
+              ? (raw.biome as BiomeType)
+              : undefined,
+          season:
+            typeof raw.season === 'string' && VALID_SEASONS.has(raw.season as SeasonType)
+              ? (raw.season as SeasonType)
+              : undefined,
+        });
+        break;
+      case 'RELEASE_PRISONERS':
+        safe.push({
+          type: 'RELEASE_PRISONERS',
+          targetName: typeof raw.targetName === 'string' ? raw.targetName.trim().slice(0, 60) : undefined,
+        });
+        break;
+      case 'REPORT_DATA':
+        safe.push({
+          type: 'REPORT_DATA',
+          answer: typeof raw.answer === 'string' ? raw.answer.slice(0, 500) : '',
+        });
+        break;
+      case 'PAUSE_RESOURCES':
+        safe.push({ type: 'PAUSE_RESOURCES', paused: Boolean(raw.paused) });
+        break;
+      case 'ADJUST_VILLAGE_MOOD':
+        safe.push({
+          type: 'ADJUST_VILLAGE_MOOD',
+          delta: safeFiniteInt(raw.delta, 10, -50, 50),
+          thought: typeof raw.thought === 'string' ? raw.thought.trim().slice(0, 140) : undefined,
+        });
+        break;
+      case 'TOGGLE_LAW': {
+        if (typeof raw.lawId === 'string' && VALID_LAW_IDS.has(raw.lawId as VillageLawId)) {
+          safe.push({
+            type: 'TOGGLE_LAW',
+            lawId: raw.lawId as VillageLawId,
+            active: typeof raw.active === 'boolean' ? raw.active : true,
+          });
+        }
+        break;
+      }
+      case 'TRIGGER_LIGHTNING_STORM':
+      case 'TRIGGER_FIRE':
+      case 'ELECT_REPRESENTATIVE':
+      case 'ISSUE_BANK_LOANS':
+      case 'FORM_MENTORSHIPS':
+      case 'REPAIR_BUILDINGS':
+      case 'RUN_CARAVANS':
+        safe.push({ type });
+        break;
+    }
+  }
+
+  return safe;
+}
+
 export function applyQwenActions(
   state: SimulationState,
   actions: QwenAction[],
@@ -5803,7 +6165,8 @@ export function applyQwenActions(
 ): string[] {
   const executed: string[] = [];
   const builtInBatch = new Set<SpecialBuildingType>();
-  const orderedActions = [...actions].sort((a, b) => {
+  const sanitized = sanitizeQwenActions(actions);
+  const orderedActions = [...sanitized].sort((a, b) => {
     const rank = (act: QwenAction) => (act.type === 'ALLOW_MORE_VILLAGERS' ? 0 : 1);
     return rank(a) - rank(b);
   });
@@ -6038,8 +6401,12 @@ export function applyQwenActions(
       case 'ALLOW_MORE_VILLAGERS': {
         state.policies.reproductionRestraint = false;
         let spawned = 0;
-        if (spawnSettlerFn && action.spawnCount && action.spawnCount > 0) {
-          spawned = spawnSettlerFn(state, action.spawnCount);
+        const safeSpawnCount =
+          typeof action.spawnCount === 'number' && Number.isFinite(action.spawnCount)
+            ? clamp(Math.round(action.spawnCount), 0, 6)
+            : 0;
+        if (spawnSettlerFn && safeSpawnCount > 0) {
+          spawned = spawnSettlerFn(state, safeSpawnCount);
         }
         if (shouldBuildHouse(state)) {
           const builder = findConstructor();
@@ -6065,15 +6432,67 @@ export function applyQwenActions(
         }
         for (const agent of state.agents) {
           agent.reproductionCooldown = 0;
+          if (action.encouragePregnancies && !agent.isChild && !agent.isSterile && agent.ageYears >= AGE_REPRODUCE_MIN_YEARS) {
+            agent.wantsChildren = true;
+          }
           agent.lastQwenDecision = 'Qwen 2.5 habilitó expansión de la especie.';
           agent.thought = 'La aldea evoluciona y hay espacio para nuevas familias y progreso.';
         }
-        executed.push(
-          spawned > 0
-            ? `Natalidad abierta · +${spawned} nuevo(s) aldeano(s)`
-            : 'Natalidad abierta y vivienda verificada'
-        );
-        addLog(state, 'Qwen 2.5 habilitó expansión poblacional sin restricciones.', 'emerald');
+
+        let newPregnancies = 0;
+        if (action.encouragePregnancies) {
+          // Emparejar adultos elegibles solteros (>= 15 años) si faltan parejas
+          const singles = state.agents.filter(
+            (a) => !a.isChild && a.ageYears >= AGE_PARTNER_MIN_YEARS && a.partnerId === null && a.jailedDays <= 0
+          );
+          for (const sAgent of singles) {
+            if (sAgent.partnerId !== null) continue;
+            const match = singles.find(
+              (other) =>
+                other.id !== sAgent.id &&
+                other.partnerId === null &&
+                other.sex !== sAgent.sex
+            );
+            if (match) {
+              sAgent.partnerId = match.id;
+              match.partnerId = sAgent.id;
+            }
+          }
+
+          // Iniciar embarazos naturales de 3 días en parejas aptas (>= 20 años, casa disponible y no estériles)
+          for (const a of state.agents) {
+            if (newPregnancies >= 3) break;
+            if (a.partnerId === null) continue;
+            const b = state.agents.find((p) => p.id === a.partnerId);
+            if (!b || a.id > b.id) continue;
+            if (canAgentsReproduce(a, b, state.houses, state.agents, state.policies)) {
+              const mother = a.sex === 'F' ? a : b;
+              const father = a.sex === 'M' ? a : b;
+              mother.pregnancy = {
+                partnerId: father.id,
+                daysRemaining: PREGNANCY_DAYS,
+                conceptionDay: state.day,
+              };
+              mother.reproductionCooldown = 180;
+              father.reproductionCooldown = 180;
+              newPregnancies++;
+              addLog(
+                state,
+                `${mother.name} y ${father.name} esperan un bebé (${PREGNANCY_DAYS} días de gestación) tras impulso familiar.`,
+                'violet'
+              );
+            }
+          }
+        }
+
+        if (spawned > 0) {
+          executed.push(`Natalidad abierta · +${spawned} nuevo(s) aldeano(s)`);
+        } else if (newPregnancies > 0) {
+          executed.push(`Natalidad abierta · ${newPregnancies} embarazo(s) de ${PREGNANCY_DAYS} días iniciados`);
+        } else {
+          executed.push('Natalidad abierta (requiere vivienda y pareja adulta ≥20 años para concebir)');
+        }
+        addLog(state, 'Qwen 2.5 habilitó expansión poblacional y familiar sin restricciones.', 'emerald');
         break;
       }
       case 'BUILD_PLAZA': {

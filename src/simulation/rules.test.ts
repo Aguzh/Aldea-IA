@@ -104,6 +104,8 @@ import {
   RIVER_TOP_Y,
   runCouncilOfElders,
   runThirtyDayMaintenance,
+  sanitizeQwenActions,
+  sanitizeQwenReply,
   setAgentJob,
   shouldBuildHouse,
   SILVER_COIN_BACKING,
@@ -1193,6 +1195,67 @@ test('Petición del Representante: "No fue Escuchado" la ignora por completo y "
   assert.ok(heardState.agents[0].happiness > 60);
   assert.ok(heardState.agents[0].health > 80);
 });
+
+test('Qwen 2.5 sandbox estricto: soporta "tengan mas hjijos" sin romper nada, rechaza acciones de sistema/corruptas y prioriza progreso', () => {
+  const state = createInitialState();
+  // Los aldeanos priorizan progreso desde el inicio
+  assert.equal(state.policies.buildPriority, true);
+  assert.equal(state.policies.workFocus, true);
+  assert.equal(state.policies.evolutionFocus, true);
+
+  // Dar una casa grande y comida suficiente para que puedan concebir 3 días
+  const house = createHouseNearCenter(state, 'Mateo', 'south', 'large');
+  for (const ag of state.agents.slice(0, 6)) {
+    ag.houseId = house.id;
+    ag.ageYears = 22;
+    ag.inv.food = 3;
+  }
+
+  // 1) Pedido de más hijos (incluso con error de tipeo "hjijos") funciona sin errores y genera embarazos naturales de 3 días
+  const kidsCmd = interpretQwenDirective(
+    'que los aldeanos tengan mas hjijos',
+    state.agents.map((a) => a.name),
+    state
+  );
+  assert.ok(kidsCmd.actions.some((a) => a.type === 'ALLOW_MORE_VILLAGERS'));
+  const execKids = applyQwenActions(state, kidsCmd.actions, spawnSettlers);
+  assert.ok(execKids.some((line) => line.includes('Natalidad abierta')));
+  assert.ok(state.agents.some((a) => a.pregnancy !== null && a.pregnancy.daysRemaining === PREGNANCY_DAYS));
+
+  // 2) Sandbox estricto contra respuestas malformadas o intentos de tocar sistema/código desde Qwen 2.5:3b
+  const maliciousPayload = [
+    { type: 'WRITE_SYSTEM_FILE', path: '/src/App.tsx' },
+    { type: 'EXEC_SHELL', cmd: 'rm -rf' },
+    { type: 'DIRECT_VILLAGER' }, // falta agentName
+    { type: 'BUILD_SPECIAL', buildingType: 'edificio_inexistente' },
+    { type: 'SPAWN_ANIMAL', animalType: 'dragon', count: 999999 },
+    { type: 'ALLOW_MORE_VILLAGERS', spawnCount: 999999, encouragePregnancies: true },
+    { type: 'BOOST_EVOLUTION', knowledgeGain: Number.NaN },
+    { type: 'SET_POLICIES', patch: { invalidSystemFlag: true, buildPriority: true } },
+  ];
+  const sanitized = sanitizeQwenActions(maliciousPayload);
+  assert.equal(sanitized.some((a) => a.type === ('WRITE_SYSTEM_FILE' as never)), false);
+  assert.equal(sanitized.some((a) => a.type === 'DIRECT_VILLAGER'), false);
+  assert.equal(sanitized.some((a) => a.type === 'BUILD_SPECIAL'), false);
+  assert.equal(sanitized.some((a) => a.type === 'SPAWN_ANIMAL'), false);
+
+  const allowAction = sanitized.find((a) => a.type === 'ALLOW_MORE_VILLAGERS');
+  assert.ok(allowAction && allowAction.type === 'ALLOW_MORE_VILLAGERS');
+  assert.equal(allowAction.spawnCount, 6); // Acotado de forma segura, nunca 999999
+
+  const boostAction = sanitized.find((a) => a.type === 'BOOST_EVOLUTION');
+  assert.ok(boostAction && boostAction.type === 'BOOST_EVOLUTION');
+  assert.equal(boostAction.knowledgeGain, 25); // NaN reemplazado por valor finito seguro
+
+  assert.equal(sanitizeQwenReply({ nested: 'object' }, 'Respaldo seguro'), 'Respaldo seguro');
+
+  // Aplicar el payload malicioso directamente no debe lanzar excepciones ni corromper knowledge/agents
+  const appliedSafe = applyQwenActions(state, maliciousPayload as never, spawnSettlers);
+  assert.ok(appliedSafe.length >= 1);
+  assert.equal(Number.isFinite(state.knowledge), true);
+  assert.ok(state.agents.length <= 20);
+});
+
 
 
 

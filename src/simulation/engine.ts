@@ -76,6 +76,8 @@ import {
   RIVER_TOP_Y,
   ROAD_GRID_SIZE,
   SAFE_LAND_MIN_Y,
+  sanitizeQwenActions,
+  sanitizeQwenReply,
   shouldBuildHouse,
   SOUTH_CENTER_Y,
   spawnFire,
@@ -251,8 +253,9 @@ export function createAgent(
 }
 
 export function spawnSettlers(state: SimulationState, count: number): number {
+  const safeCount = Number.isFinite(count) ? clamp(Math.round(count), 0, 12) : 0;
   let spawned = 0;
-  for (let i = 0; i < count; i++) {
+  for (let i = 0; i < safeCount; i++) {
     const id = state.nextId++;
     const sex: 'M' | 'F' = id % 2 === 0 ? 'M' : 'F';
     const pool = sex === 'M' ? MALE_NAMES : FEMALE_NAMES;
@@ -378,7 +381,7 @@ export function createInitialState(): SimulationState {
       lastTaxCollectedDay: 1,
     },
     policies: {
-      buildPriority: false,
+      buildPriority: true,
       workFocus: true,
       evolutionFocus: true,
       economyFocus: false,
@@ -773,14 +776,14 @@ function chooseNextTask(state: SimulationState, agent: Agent, isNight = false): 
     agent.toolsCount < 2 &&
     availCopper >= (PRODUCTION_INPUT_COSTS.forgeTool.copper ?? 1) &&
     availIron >= (PRODUCTION_INPUT_COSTS.forgeTool.iron ?? 1) &&
-    Math.random() < 0.32
+    Math.random() < 0.48
   ) {
     setAgentTask(agent, 'craft_tools', 28);
     return;
   }
 
   // 7. Administrar el edificio propio/asignado
-  if (agent.assignedBuildingId !== null && Math.random() < 0.4) {
+  if (agent.assignedBuildingId !== null && Math.random() < 0.55) {
     setAgentTask(agent, 'manage_building', 32, agent.assignedBuildingId);
     return;
   }
@@ -973,7 +976,7 @@ function chooseNextTask(state: SimulationState, agent: Agent, isNight = false): 
       }
     }
 
-    if (state.knowledge >= 22) {
+    if (state.knowledge >= 18) {
       const order: SpecialBuildingType[] = [
         'general_depot',
         'dock',
@@ -1018,6 +1021,26 @@ function chooseNextTask(state: SimulationState, agent: Agent, isNight = false): 
       }
     }
 
+    // Progreso continuo: mejorar edificios especiales existentes cuando la era/saber lo permiten
+    for (const sb of state.specialBuildings) {
+      if (sb.level < 3) {
+        const plan = validateAndComputeConstructionPlan(state, agent, 'upgrade_special', {
+          specialType: sb.type,
+        });
+        if (plan.ok && hasEnoughBuilderOrDepotResources(state, agent, plan.cost)) {
+          const started = startConstructionProject(state, agent, 'upgrade_special', {
+            specialType: sb.type,
+            duration: 40,
+          });
+          if (started.ok) {
+            decideVillagerMajorAction(state, agent, 'construction', { chosenBuilding: sb.type });
+            setAgentTask(agent, 'build_special', 44);
+            return;
+          }
+        }
+      }
+    }
+
     // Si faltan materiales para la próxima obra prioritaria, ir a recolectarlos
     const nextPlan = shouldBuildHouse(state)
       ? validateAndComputeConstructionPlan(state, agent, 'house')
@@ -1038,7 +1061,7 @@ function chooseNextTask(state: SimulationState, agent: Agent, isNight = false): 
     }
   }
 
-  if (agent.job === 'Erudito' || agent.job === 'Maestro' || (state.policies.evolutionFocus && Math.random() < 0.16)) {
+  if (agent.job === 'Erudito' || agent.job === 'Maestro' || (state.policies.evolutionFocus && Math.random() < 0.24)) {
     setAgentTask(agent, 'research', 36);
     return;
   }
@@ -1084,7 +1107,13 @@ function chooseNextTask(state: SimulationState, agent: Agent, isNight = false): 
     return;
   }
 
-  setAgentTask(agent, 'idle', 24);
+  // Buscar progreso por sobre todas las cosas: estudiar/investigar en lugar de quedar inactivo
+  if (!agent.isChild && agent.energy >= 30) {
+    setAgentTask(agent, 'research', 28);
+    return;
+  }
+
+  setAgentTask(agent, 'idle', 20);
 }
 
 function moveTowards(
@@ -4059,13 +4088,18 @@ export async function askQwenAssistant(
     try {
       const villageSummary = buildQwenVillageTelemetry(state);
 
-      const systemPrompt = `Eres Qwen 2.5, IA con control TOTAL sobre "Aldea IA" para consultar/recopilar datos reales e imponer órdenes en toda la aldea.
+      const systemPrompt = `Eres Qwen 2.5, IA dentro del mundo de "Aldea IA".
+REGLA DE SEGURIDAD ESTRICTA (SANDBOX):
+- SOLO puedes consultar datos de la aldea o ejecutar acciones permitidas SOBRE EL MAPA DE LA ALDEA usando el esquema JSON exacto de abajo.
+- NUNCA modifiques archivos, código fuente, configuración del sistema, inicio de la app, ni agregues código o comandos de sistema.
+
 Datos completos en tiempo real de la aldea: ${JSON.stringify(villageSummary)}.
 Orden o pregunta del jugador: "${userPrompt}".
 Responde EXCLUSIVAMENTE un JSON válido con:
 {
-  "reply": "Respuesta clara en español con datos reales o confirmación exacta de lo ejecutado",
+  "reply": "Texto corto en español confirmando los datos reales o lo ejecutado en el mapa",
   "actions": [
+    { "type": "ALLOW_MORE_VILLAGERS", "spawnCount": 0, "encouragePregnancies": true },
     { "type": "ASSIGN_ACTIVE_JOBS", "preferredJob": "Panadero|Minero|Constructor|Carpintero|...", "fraction": 0.5, "count": 5, "fromJob": "...", "forceChange": true },
     { "type": "DIRECT_VILLAGER", "agentName": "Nombre", "job": "...", "action": "heal|build|trade|research|switch_partner|fish|store_home" },
     { "type": "GRANT_VILLAGER_ITEMS", "resource": "gold|silver|coins|food|wood|stone|iron|copper|medicine|tools", "amount": 5, "targetName": "opcional" },
@@ -4087,7 +4121,7 @@ Responde EXCLUSIVAMENTE un JSON válido con:
     { "type": "REPORT_DATA", "answer": "si solo es pregunta/consulta sin modificar nada" }
   ]
 }
-Si es una pregunta de datos (ej. posibles trabajadores), usa los números exactos de posiblesTrabajadoresPorEdificio y retorna { "type": "REPORT_DATA", "answer": "..." }. Si es una orden de cambio, incluye siempre las acciones exactas.`;
+Si es una pregunta de datos (ej. posibles trabajadores), usa los números exactos de posiblesTrabajadoresPorEdificio y retorna { "type": "REPORT_DATA", "answer": "..." }. Si pide que tengan más hijos o natalidad, usa { "type": "ALLOW_MORE_VILLAGERS", "spawnCount": 0, "encouragePregnancies": true }.`;
 
       const res = await fetch(state.ollama.url, {
         method: 'POST',
@@ -4103,8 +4137,8 @@ Si es una pregunta de datos (ej. posibles trabajadores), usa los números exacto
       if (res.ok) {
         const data = await res.json();
         const raw = typeof data?.response === 'string' ? data.response : '';
-        const parsed = JSON.parse(raw) as { reply?: string; actions?: QwenAction[] };
-        if (parsed && Array.isArray(parsed.actions)) {
+        const parsed = JSON.parse(raw) as { reply?: unknown; actions?: unknown };
+        if (parsed && typeof parsed === 'object') {
           if (queryCheck.matched) {
             return {
               reply: queryCheck.reply,
@@ -4112,26 +4146,30 @@ Si es una pregunta de datos (ej. posibles trabajadores), usa los números exacto
               source: 'ollama',
             };
           }
-          // Respaldo de autoridad: si Ollama devolvió acciones vacías, REPORT_DATA ante una orden real, o dejó fuera parámetros clave de cambio de trabajo/clima/riqueza, fusionar las acciones determinísticas locales
-          const localHasMassJob = localResult.actions.some(
+
+          // Sandbox estricto: sanitiza todas las acciones devueltas por qwen2.5:3b antes de tocar el mapa
+          const sanitizedParsed = sanitizeQwenActions(parsed.actions);
+          const sanitizedLocal = sanitizeQwenActions(localResult.actions);
+
+          const localHasMassJob = sanitizedLocal.some(
             (a) => a.type === 'ASSIGN_ACTIVE_JOBS' && (a.fraction !== undefined || a.count !== undefined || a.forceChange)
           );
-          const ollamaHasCompleteJob = parsed.actions.some(
+          const ollamaHasCompleteJob = sanitizedParsed.some(
             (a) => a.type === 'ASSIGN_ACTIVE_JOBS' && (a.fraction !== undefined || a.count !== undefined || a.forceChange)
           );
-          const meaningfulParsed = parsed.actions.filter((a) => a.type !== 'REPORT_DATA');
+          const meaningfulParsed = sanitizedParsed.filter((a) => a.type !== 'REPORT_DATA');
           const parsedTypes = new Set(meaningfulParsed.map((a) => a.type));
-          const missingLocalActions = localResult.actions.filter(
+          const missingLocalActions = sanitizedLocal.filter(
             (a) => a.type !== 'REPORT_DATA' && !parsedTypes.has(a.type)
           );
 
           let finalActions: QwenAction[];
           if (meaningfulParsed.length === 0) {
-            finalActions = localResult.actions;
+            finalActions = sanitizedLocal;
           } else if (localHasMassJob && !ollamaHasCompleteJob) {
             finalActions = [
               ...meaningfulParsed.filter((a) => a.type !== 'ASSIGN_ACTIVE_JOBS'),
-              ...localResult.actions.filter((a) => a.type === 'ASSIGN_ACTIVE_JOBS' || a.type === 'SET_POLICIES'),
+              ...sanitizedLocal.filter((a) => a.type === 'ASSIGN_ACTIVE_JOBS' || a.type === 'SET_POLICIES'),
               ...missingLocalActions.filter((a) => a.type !== 'ASSIGN_ACTIVE_JOBS' && a.type !== 'SET_POLICIES'),
             ];
           } else {
@@ -4139,19 +4177,16 @@ Si es una pregunta de datos (ej. posibles trabajadores), usa los números exacto
           }
 
           const appliedRules = applyQwenActions(state, finalActions, spawnSettlers);
-          const replyText =
-            appliedRules.length > 0 && parsed.reply
-              ? parsed.reply
-              : localResult.reply;
+          const safeReply = sanitizeQwenReply(parsed.reply, localResult.reply);
           return {
-            reply: replyText,
+            reply: appliedRules.length > 0 ? safeReply : localResult.reply,
             appliedRules,
             source: 'ollama',
           };
         }
       }
     } catch {
-      // Fallback al motor local
+      // Fallback seguro al motor local si Ollama devuelve JSON inválido o falla
     }
   }
 
@@ -4163,12 +4198,20 @@ Si es una pregunta de datos (ej. posibles trabajadores), usa los números exacto
     };
   }
 
-  const appliedRules = applyQwenActions(state, localResult.actions, spawnSettlers);
-  return {
-    reply: localResult.reply,
-    appliedRules,
-    source: 'local',
-  };
+  try {
+    const appliedRules = applyQwenActions(state, localResult.actions, spawnSettlers);
+    return {
+      reply: localResult.reply,
+      appliedRules,
+      source: 'local',
+    };
+  } catch {
+    return {
+      reply: 'Orden ignorada por seguridad para proteger la estabilidad de la aldea.',
+      appliedRules: [],
+      source: 'local',
+    };
+  }
 }
 
 export async function queryOllamaThoughtForAgent(
