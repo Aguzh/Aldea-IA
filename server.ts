@@ -86,7 +86,7 @@ function buildStandalonePackageJson(): string {
       dependencies: {
         '@tailwindcss/vite': '^4.3.3',
         '@vitejs/plugin-react': '^6.1.1',
-        esbuild: '^0.25.0',
+        esbuild: '^0.28.0',
         express: '^4.21.2',
         jszip: '^3.10.2',
         'lucide-react': '^0.546.0',

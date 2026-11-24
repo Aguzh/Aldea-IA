@@ -27,6 +27,7 @@ interface TopBarProps {
   onOpenFamilies: () => void;
   onOpenSaveLoad: () => void;
   onOpenDownload: () => void;
+  onRequestReset: () => void;
   onOpenOllama: () => void;
 }
 
@@ -39,6 +40,7 @@ export function TopBar({
   onOpenFamilies,
   onOpenSaveLoad,
   onOpenDownload,
+  onRequestReset,
   onOpenOllama,
 }: TopBarProps) {
   const hh = String(Math.floor(snapshot.minute / 60)).padStart(2, '0');
@@ -210,6 +212,15 @@ export function TopBar({
           className="px-2.5 py-1.5 text-xs font-medium rounded-lg border border-emerald-700/70 bg-emerald-950/60 text-emerald-200 hover:bg-emerald-900/70 transition-colors whitespace-nowrap shrink-0"
         >
           Descargar PC
+        </button>
+
+        <button
+          type="button"
+          onClick={onRequestReset}
+          data-testid="reset-village-btn"
+          className="px-2.5 py-1.5 text-xs font-medium rounded-lg border border-rose-700/70 bg-rose-950/60 text-rose-200 hover:bg-rose-900/70 transition-colors whitespace-nowrap shrink-0"
+        >
+          Reiniciar
         </button>
 
         <div className="flex items-center bg-[#0b1120] border border-slate-800 rounded-lg p-0.5" role="group" aria-label="Orientación de pantalla">

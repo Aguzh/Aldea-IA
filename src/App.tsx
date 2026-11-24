@@ -309,6 +309,7 @@ export default function App() {
   const [isFamiliesOpen, setIsFamiliesOpen] = useState(false);
   const [isSaveLoadOpen, setIsSaveLoadOpen] = useState(false);
   const [isDownloadOpen, setIsDownloadOpen] = useState(false);
+  const [isResetConfirmOpen, setIsResetConfirmOpen] = useState(false);
   const [isQwenBusy, setIsQwenBusy] = useState(false);
   const [isVerticalAuto, setIsVerticalAuto] = useState(false);
   const [serverSyncStatus, setServerSyncStatus] = useState<string>('Sincronizado');
@@ -1104,19 +1105,21 @@ export default function App() {
   }
 
   async function handleResetVillage() {
-    try {
-      await fetch('/api/state', { method: 'DELETE' });
-    } catch {
-      // Ignore network errors
-    }
+    setIsResetConfirmOpen(false);
+    stateRef.current = createInitialState();
+    cameraRef.current = { zoom: 1, panX: 0, panY: 0 };
     try {
       localStorage.removeItem(SAVE_STORAGE_KEY);
     } catch {
       // Ignore storage errors
     }
-    stateRef.current = createInitialState();
     setServerSyncStatus('Reiniciada desde cero');
     syncUI();
+    try {
+      await fetch('/api/state', { method: 'DELETE' });
+    } catch {
+      // Ignore network errors
+    }
   }
 
   function handleLoadFromJson(jsonText: string) {
@@ -1189,6 +1192,7 @@ export default function App() {
         onOpenFamilies={() => setIsFamiliesOpen(true)}
         onOpenSaveLoad={() => setIsSaveLoadOpen(true)}
         onOpenDownload={() => setIsDownloadOpen(true)}
+        onRequestReset={() => setIsResetConfirmOpen(true)}
         onOpenOllama={() => setIsOllamaOpen(true)}
       />
 
@@ -1473,6 +1477,54 @@ export default function App() {
           onSave={handleSaveOllama}
           onClose={() => setIsOllamaOpen(false)}
         />
+      )}
+
+      {isResetConfirmOpen && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-950/80 flex items-center justify-center p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="reset-confirm-title"
+          data-testid="reset-confirm-modal"
+        >
+          <div className="bg-[#111827] border border-rose-700/80 rounded-xl p-5 w-full max-w-md flex flex-col gap-3.5 shadow-2xl">
+            <div className="flex items-center justify-between gap-2 border-b border-slate-800 pb-2.5">
+              <div>
+                <span className="text-[11px] uppercase tracking-wider font-semibold text-rose-400">
+                  Advertencia
+                </span>
+                <h2 id="reset-confirm-title" className="text-base font-bold text-slate-50 mt-0.5">
+                  ¿Reiniciar toda la aldea?
+                </h2>
+              </div>
+            </div>
+
+            <p className="text-xs text-slate-300 leading-relaxed">
+              Si continuás, <strong className="text-rose-300">todo se va a borrar</strong> (casas, edificios, cultivos,
+              caminos, crónicas, reservas y progreso) y la aldea volverá al inicio de los tiempos como si empezara de cero.
+              ¿Querés seguir?
+            </p>
+
+            <div className="grid grid-cols-2 gap-2.5 pt-1">
+              <button
+                type="button"
+                data-testid="reset-cancel-btn"
+                onClick={() => setIsResetConfirmOpen(false)}
+                className="py-2 px-3 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-semibold transition-colors"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                data-testid="reset-accept-btn"
+                onClick={() => void handleResetVillage()}
+                className="py-2 px-3 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold transition-colors"
+              >
+                Aceptar
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
