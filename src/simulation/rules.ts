@@ -39,16 +39,18 @@ export const CANVAS_HEIGHT = 960;
 export const WORLD_CENTER_X = 720;
 export const WORLD_CENTER_Y = 480;
 
-// Geografía del mapa: Bosque a la Izquierda, Montañas a la Derecha, Valle central + Río superior
+// Geografía del mapa: Bosque a la Izquierda, Montañas a la Derecha, Valle central + Río a la mitad
 export const FOREST_MAX_X = 330;
 export const MOUNTAIN_MIN_X = 1110;
 
-// Río superior que divide Zona Norte (y=24..128) y Zona Sur (y=224..928) unidos por puente
-export const RIVER_TOP_Y = 148;
-export const RIVER_BOTTOM_Y = 206;
-export const NORTH_LAND_MIN_Y = 24;
-export const NORTH_LAND_MAX_Y = 128;
-export const SAFE_LAND_MIN_Y = 224;
+// Río horizontal en la mitad del mapa que divide Zona Norte (y=26..424) y Zona Sur (y=532..928)
+export const RIVER_TOP_Y = 446;
+export const RIVER_BOTTOM_Y = 514;
+export const NORTH_LAND_MIN_Y = 26;
+export const NORTH_LAND_MAX_Y = 424;
+export const SAFE_LAND_MIN_Y = 532;
+export const NORTH_CENTER_Y = 220;
+export const SOUTH_CENTER_Y = 710;
 export const BRIDGE_X_MIN = 684;
 export const BRIDGE_X_MAX = 756;
 export const BRIDGE_CENTER_X = 720;
@@ -1087,6 +1089,40 @@ export function transferBuildingOwnership(
   }
   syncSpecialBuildingStaff(state);
   return true;
+}
+
+export function rebalanceBuildingOwnership(state: SimulationState): number {
+  let changes = 0;
+  for (const b of state.specialBuildings) {
+    if (b.category !== 'commerce' && b.type !== 'dock') continue;
+    const owner = b.ownerId !== null ? state.agents.find((a) => a.id === b.ownerId) : null;
+
+    if (owner && !b.forSale && (owner.happiness < 28 || owner.energy < 20)) {
+      b.forSale = true;
+      owner.lastQwenDecision = `Qwen 2.5 permitió a ${owner.name} poner en venta ${b.name} por agotamiento.`;
+      addLog(state, `${owner.name} puso en venta ${b.name} (${b.price} mon.).`, 'slate');
+    }
+
+    if (b.forSale || b.ownerId === null) {
+      const buyer = state.agents.find(
+        (a) =>
+          !a.isChild &&
+          a.id !== b.ownerId &&
+          a.jailedDays <= 0 &&
+          a.assignedBuildingId === null &&
+          a.education >= 30 &&
+          a.coins >= b.price
+      );
+      if (buyer) {
+        buyer.coins -= b.price;
+        if (owner) owner.coins += b.price;
+        if (transferBuildingOwnership(state, b.id, buyer.id, `compra autónoma por ${b.price} mon.`)) {
+          changes++;
+        }
+      }
+    }
+  }
+  return changes;
 }
 
 export function getTotalCirculatingCoins(state: SimulationState): number {
@@ -2559,6 +2595,7 @@ export function advanceDayAging(
   state.agents = survivors;
   rebalanceFamilyHousing(state);
   syncSpecialBuildingStaff(state);
+  rebalanceBuildingOwnership(state);
   recalculateEconomyReserve(state);
   electRepresentative(state);
 
@@ -2923,7 +2960,7 @@ function getSettlementAnchor(
   }
   return {
     x: WORLD_CENTER_X + (Math.random() - 0.5) * 220,
-    y: zone === 'north' ? 76 : WORLD_CENTER_Y + (Math.random() - 0.5) * 140,
+    y: zone === 'north' ? NORTH_CENTER_Y + (Math.random() - 0.5) * 80 : SOUTH_CENTER_Y + (Math.random() - 0.5) * 120,
   };
 }
 
@@ -2971,17 +3008,22 @@ export function chooseQwenBuildSpot(
   const seedAngle = (state.nextId * 1.618 + state.houses.length * 0.73 + state.specialBuildings.length * 1.15) % (Math.PI * 2);
 
   if (zone === 'north') {
-    for (let attempt = 0; attempt < 60; attempt++) {
-      const spreadX = (attempt % 2 === 0 ? 1 : -1) * (40 + Math.floor(attempt / 2) * 48) + (Math.random() - 0.5) * 32;
-      const cx = clamp(anchor.x + spreadX, FOREST_MAX_X + 20, MOUNTAIN_MIN_X - 20);
-      const cy = clamp(54 + (attempt % 3) * 26 + (Math.random() - 0.5) * 14, NORTH_LAND_MIN_Y + 26, NORTH_LAND_MAX_Y - 16);
-      if (isSpotClear(state, cx, cy, 60, 72, 90, 56)) {
+    for (let attempt = 0; attempt < 64; attempt++) {
+      const angle = seedAngle + attempt * 0.75;
+      const radius = 55 + Math.floor(attempt / 6) * 44;
+      const cx = clamp(anchor.x + Math.cos(angle) * radius, FOREST_MAX_X + 26, MOUNTAIN_MIN_X - 26);
+      const cy = clamp(
+        NORTH_CENTER_Y + Math.sin(angle) * (radius * 0.72),
+        NORTH_LAND_MIN_Y + 46,
+        NORTH_LAND_MAX_Y - 46
+      );
+      if (isSpotClear(state, cx, cy, 62, 74, 96, 58)) {
         return { x: Math.round(cx), y: Math.round(cy) };
       }
     }
     return {
-      x: Math.round(clamp(420 + Math.random() * 580, FOREST_MAX_X + 20, MOUNTAIN_MIN_X - 20)),
-      y: 78,
+      x: Math.round(clamp(420 + Math.random() * 580, FOREST_MAX_X + 30, MOUNTAIN_MIN_X - 30)),
+      y: NORTH_CENTER_Y,
     };
   }
 
@@ -3394,19 +3436,19 @@ function addRoadLine(state: SimulationState, x1: number, y1: number, x2: number,
 export function buildBaseRoads(state: SimulationState): number {
   let added = 0;
   const hubX = state.plaza ? state.plaza.x : WORLD_CENTER_X;
-  const hubY = state.plaza ? state.plaza.y : WORLD_CENTER_Y;
+  const hubY = state.plaza ? state.plaza.y : SOUTH_CENTER_Y;
 
   if (state.bridge) {
     added += addRoadLine(state, hubX, hubY, state.bridge.x, RIVER_BOTTOM_Y + 18);
-    added += addRoadLine(state, state.bridge.x, RIVER_BOTTOM_Y + 18, state.bridge.x, 78);
-    added += addRoadLine(state, state.bridge.x - 160, 78, state.bridge.x + 160, 78);
+    added += addRoadLine(state, state.bridge.x, RIVER_BOTTOM_Y + 18, state.bridge.x, NORTH_CENTER_Y);
+    added += addRoadLine(state, state.bridge.x - 160, NORTH_CENTER_Y, state.bridge.x + 160, NORTH_CENTER_Y);
   }
 
   for (const house of state.houses) {
     if (house.zone === 'south') {
       added += addRoadLine(state, hubX, hubY, house.x, house.y + 12);
     } else if (state.bridge) {
-      added += addRoadLine(state, state.bridge.x, 78, house.x, house.y + 12);
+      added += addRoadLine(state, state.bridge.x, NORTH_CENTER_Y, house.x, house.y + 12);
     }
   }
   for (const b of state.specialBuildings) {
@@ -3440,9 +3482,15 @@ export function createAnimal(
     if (isFish) {
       ay = RIVER_TOP_Y + 12 + Math.random() * (RIVER_BOTTOM_Y - RIVER_TOP_Y - 24);
     } else if (isHostile) {
-      ay = Math.random() < 0.4 ? NORTH_LAND_MIN_Y + 24 : SAFE_LAND_MIN_Y + 40 + Math.random() * 520;
+      ay =
+        Math.random() < 0.45
+          ? NORTH_LAND_MIN_Y + 40 + Math.random() * (NORTH_LAND_MAX_Y - NORTH_LAND_MIN_Y - 80)
+          : SAFE_LAND_MIN_Y + 40 + Math.random() * (CANVAS_HEIGHT - SAFE_LAND_MIN_Y - 90);
     } else {
-      ay = SAFE_LAND_MIN_Y + 40 + Math.random() * (CANVAS_HEIGHT - SAFE_LAND_MIN_Y - 90);
+      ay =
+        Math.random() < 0.25
+          ? NORTH_LAND_MIN_Y + 40 + Math.random() * (NORTH_LAND_MAX_Y - NORTH_LAND_MIN_Y - 80)
+          : SAFE_LAND_MIN_Y + 40 + Math.random() * (CANVAS_HEIGHT - SAFE_LAND_MIN_Y - 90);
     }
   }
 
@@ -3907,7 +3955,7 @@ export function applyQwenActions(
         const f = spawnFire(
           state,
           WORLD_CENTER_X + (Math.random() - 0.5) * 200,
-          SAFE_LAND_MIN_Y + 120 + Math.random() * 200,
+          SOUTH_CENTER_Y + (Math.random() - 0.5) * 180,
           'Directiva Qwen 2.5'
         );
         executed.push(`Incendio en (${Math.round(f.x)}, ${Math.round(f.y)})`);

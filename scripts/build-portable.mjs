@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import * as esbuild from 'esbuild';
 
 export async function generatePortableHtml(rootDir = process.cwd()) {
@@ -65,7 +66,7 @@ export async function generatePortableHtml(rootDir = process.cwd()) {
   return html;
 }
 
-const isMain = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname);
+const isMain = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
 if (isMain) {
   await generatePortableHtml();
   console.log('Archivo portable dist/aldea-ia-local.html generado.');

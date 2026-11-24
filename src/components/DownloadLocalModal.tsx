@@ -88,7 +88,7 @@ export function DownloadLocalModal({ onClose }: DownloadLocalModalProps) {
             <span className="text-[11px] text-slate-400">Con lanzador local</span>
           </div>
           <p className="text-xs text-slate-300 leading-relaxed">
-            Incluye el código fuente completo (<code className="font-mono text-slate-100">src/</code>, <code className="font-mono text-slate-100">package.json</code>, <code className="font-mono text-slate-100">README.md</code>) y lanzadores directos: <code className="font-mono text-slate-100">INICIAR_WINDOWS.bat</code> y <code className="font-mono text-slate-100">iniciar.sh</code>.
+            Incluye el código fuente completo (<code className="font-mono text-slate-100">src/</code>, <code className="font-mono text-slate-100">server.ts</code>, <code className="font-mono text-slate-100">package.json</code>), lanzadores directos (<code className="font-mono text-slate-100">INICIAR_WINDOWS.bat</code> y <code className="font-mono text-slate-100">iniciar.sh</code>) y <code className="font-mono text-slate-100">ALDEA_IA_PORTABLE.html</code>. Descomprimí el ZIP antes de ejecutar.
           </p>
           <button
             type="button"

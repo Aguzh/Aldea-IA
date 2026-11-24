@@ -79,17 +79,21 @@ import {
   MOUNTAIN_MIN_X,
   NIGHT_DURATION_SECONDS,
   NIGHT_START_MINUTE,
+  NORTH_CENTER_Y,
   PETITION_INTERVAL_SECONDS,
   pickQwenBabyName,
   PREGNANCY_DAYS,
   progressDiseasesDaily,
+  rebalanceBuildingOwnership,
   rebalanceFamilyHousing,
   repairDamagedStructures,
   resolvePetition,
+  RIVER_BOTTOM_Y,
   RIVER_TOP_Y,
   runCouncilOfElders,
   shouldBuildHouse,
   SILVER_COIN_BACKING,
+  SOUTH_CENTER_Y,
   spawnFire,
   SPEED_TIMINGS,
   switchPartnerForAgent,
@@ -100,6 +104,7 @@ import {
   transferBuildingOwnership,
   triggerLightningStorm,
   VILLAGE_SKILLS,
+  WORLD_CENTER_Y,
 } from './rules';
 import type { DiseaseInfo } from '../types/simulation';
 import { createAgent, createInitialState, spawnResource, spawnSettlers, tickSimulation } from './engine';
@@ -123,6 +128,15 @@ test('El juego inicia con 5 mujeres, 5 hombres, recursos finitos y sin ninguna c
   assert.ok(state.resources.every((r) => r.maxAmount > 0 && r.depleted === false));
   assert.equal(state.riverFishStock, state.riverFishMaxStock);
   assert.equal(state.laws.length, 7);
+
+  // Río horizontal en la mitad exacta del mapa (y≈446..514), sin fundadores ni animales terrestres en el agua
+  assert.ok(RIVER_TOP_Y >= 400 && RIVER_BOTTOM_Y <= 560);
+  assert.ok(WORLD_CENTER_Y >= RIVER_TOP_Y && WORLD_CENTER_Y <= RIVER_BOTTOM_Y);
+  assert.ok(NORTH_CENTER_Y < RIVER_TOP_Y && SOUTH_CENTER_Y > RIVER_BOTTOM_Y);
+  assert.ok(state.agents.every((a) => !isPointInRiverWater(a.x, a.y, null)));
+  assert.ok(state.animals.filter((an) => an.type !== 'fish').every((an) => !isPointInRiverWater(an.x, an.y, null)));
+  assert.ok(state.resources.some((r) => r.y < RIVER_TOP_Y));
+  assert.ok(state.resources.some((r) => r.y > RIVER_BOTTOM_Y));
 });
 
 test('El día dura 7 minutos reales (420s) y la noche dura 3 minutos reales (180s)', () => {
@@ -552,10 +566,19 @@ test('Edificios especiales: depósito estricto, propietario exclusivo, competenc
   assert.equal(getCompetingBuildingCount(state, 'bakery'), 2);
   assert.notEqual(b1.ownerId, b2.ownerId);
 
-  // Transferencia de propiedad
+  // Transferencia de propiedad manual y autónoma (Qwen 2.5)
   const newOwner = state.agents[5];
   assert.equal(transferBuildingOwnership(state, b1.id, newOwner.id, 'venta directa'), true);
   assert.equal(b1.ownerId, newOwner.id);
+
+  // Compraventa autónoma cuando el propietario está exhausto/triste y otro aldeano sabio tiene monedas
+  newOwner.happiness = 20;
+  const buyer = state.agents[6];
+  buyer.assignedBuildingId = null;
+  buyer.education = 40;
+  buyer.coins = b1.price + 20;
+  assert.equal(rebalanceBuildingOwnership(state), 1);
+  assert.equal(b1.ownerId, buyer.id);
 });
 
 test('Recursos finitos y cardumen se agotan y renuevan solo tras reposo', () => {

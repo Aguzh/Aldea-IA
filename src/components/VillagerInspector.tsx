@@ -682,8 +682,6 @@ export function VillagerInspector({
   const stageLabel = agent.isChild ? 'Niño/a' : agent.isElder ? 'Anciano/a' : 'Adulto/a';
   const isFamilyHighlighted = highlightedFamilyId === agent.id;
   const educationPct = clampPct(agent.education ?? 10);
-  const carpentryPct = clampPct(agent.carpentryKnowledge ?? 8);
-  const constructionPct = clampPct(agent.constructionKnowledge ?? 12);
   const unlockedIds = new Set(agent.skills ?? []);
 
   // Oficios y maestrías (máx 3 Maestros > 70%)
@@ -858,32 +856,6 @@ export function VillagerInspector({
               </div>
               <div className="h-1.5 w-full bg-[#0b1120] rounded-full overflow-hidden">
                 <div className="h-full bg-sky-400 transition-all duration-200" style={{ width: `${educationPct}%` }} />
-              </div>
-            </div>
-
-            {/* Saber en Carpintería (Solo lectura autónoma) */}
-            <div className="flex flex-col gap-1">
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-slate-400">Carpintería autónoma (Pino 10 · Arce 50 · Roble 80)</span>
-                <span className="font-medium font-mono tabular-nums text-amber-300" data-testid="inspector-carpentry-knowledge">
-                  {carpentryPct}%
-                </span>
-              </div>
-              <div className="h-1.5 w-full bg-[#0b1120] rounded-full overflow-hidden">
-                <div className="h-full bg-amber-400 transition-all duration-200" style={{ width: `${carpentryPct}%` }} />
-              </div>
-            </div>
-
-            {/* Saber en Construcción (Solo lectura autónoma) */}
-            <div className="flex flex-col gap-1">
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-slate-400">Construcción autónoma (Obras mejores)</span>
-                <span className="font-medium font-mono tabular-nums text-emerald-300" data-testid="inspector-construction-knowledge">
-                  {constructionPct}%
-                </span>
-              </div>
-              <div className="h-1.5 w-full bg-[#0b1120] rounded-full overflow-hidden">
-                <div className="h-full bg-emerald-400 transition-all duration-200" style={{ width: `${constructionPct}%` }} />
               </div>
             </div>
 

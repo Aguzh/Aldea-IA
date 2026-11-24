@@ -31,12 +31,16 @@ function buildLocalReadme(): string {
 
 Simulador de vida autónomo en pixel art con evolución de eras, construcción de viviendas y edificios especiales, estaciones del año, cultivos, economía emergente, salud/envejecimiento (1 día = 1 año) y consola de reglas con **Qwen 2.5**.
 
-## Opción 1: Ejecución rápida con Node.js
+## Importante antes de empezar (Windows)
+1. **Extraé (descomprimí) todo el archivo \`.zip\`** en una carpeta real (por ejemplo \`C:\\AldeaIA\`). No ejecutes \`INICIAR_WINDOWS.bat\` directamente desde adentro del ZIP sin extraerlo.
+2. Si querés jugar al instante **sin instalar Node.js ni npm**, abrí directamente el archivo \`ALDEA_IA_PORTABLE.html\` incluido en esta carpeta con Chrome o Edge.
+
+## Opción 1: Ejecución rápida con Node.js (con guardado en disco)
 
 Requisitos: [Node.js 20+](https://nodejs.org/) instalado en tu PC.
 
 ### En Windows
-Hacé doble clic en \`INICIAR_WINDOWS.bat\` (instala dependencias automáticamente la primera vez y abre http://localhost:3000).
+Hacé doble clic en \`INICIAR_WINDOWS.bat\` (verifica e instala dependencias automáticamente la primera vez y abre http://localhost:3000).
 
 ### En Linux / Mac
 \`\`\`bash
@@ -46,7 +50,7 @@ chmod +x iniciar.sh
 
 ### Manual (cualquier sistema)
 \`\`\`bash
-npm install
+npm install --include=dev
 npm run dev
 \`\`\`
 Luego abrí en tu navegador: **http://localhost:3000**
@@ -73,25 +77,31 @@ function buildStandalonePackageJson(): string {
       version: '1.0.0',
       type: 'module',
       scripts: {
-        dev: 'vite --port=3000 --host=127.0.0.1',
-        build: 'vite build',
-        preview: 'vite preview --port=3000',
-        lint: 'tsc --noEmit',
+        dev: 'node ./node_modules/tsx/dist/cli.mjs server.ts',
+        'dev:vite': 'node ./node_modules/vite/bin/vite.js --port=3000 --host=127.0.0.1',
+        build: 'node ./node_modules/vite/bin/vite.js build',
+        preview: 'node ./node_modules/vite/bin/vite.js preview --port=3000',
+        lint: 'node ./node_modules/typescript/bin/tsc --noEmit',
       },
       dependencies: {
+        '@tailwindcss/vite': '^4.3.3',
+        '@vitejs/plugin-react': '^6.1.1',
+        esbuild: '^0.25.0',
+        express: '^4.21.2',
+        jszip: '^3.10.2',
         'lucide-react': '^0.546.0',
         react: '^19.0.1',
         'react-dom': '^19.0.1',
+        tailwindcss: '^4.3.3',
+        tsx: '^4.21.0',
+        vite: '^8.3.0',
       },
       devDependencies: {
-        '@tailwindcss/vite': '^4.3.3',
+        '@types/express': '^4.17.21',
         '@types/node': '^22.14.0',
         '@types/react': '^19.3.0',
         '@types/react-dom': '^19.3.0',
-        '@vitejs/plugin-react': '^6.1.1',
-        tailwindcss: '^4.3.3',
         typescript: '^7.0.2',
-        vite: '^8.3.0',
       },
     },
     null,
@@ -100,33 +110,73 @@ function buildStandalonePackageJson(): string {
 }
 
 function buildWindowsLauncher(): string {
-  return `@echo off
-title Aldea IA - Simulador Local
-cd /d "%~dp0"
-where node >nul 2>nul
-if %errorlevel% neq 0 (
-  echo [ERROR] No se encontro Node.js instalado. Descargalo desde https://nodejs.org/
-  pause
-  exit /b 1
-)
-if not exist "node_modules" (
-  echo Instalando dependencias por primera vez...
-  call npm install
-)
-echo Iniciando Aldea IA en http://localhost:3000 ...
-start "" http://localhost:3000
-call npm run dev
-pause
-`;
+  const lines = [
+    '@echo off',
+    'setlocal',
+    'title Aldea IA - Simulador Local',
+    'cd /d "%~dp0"',
+    'if not exist "package.json" (',
+    '  echo [ERROR] No se encontro package.json en esta carpeta.',
+    '  echo Asegurate de EXTRAER todo el archivo .zip antes de ejecutar INICIAR_WINDOWS.bat.',
+    '  pause',
+    '  exit /b 1',
+    ')',
+    'where node >nul 2>nul',
+    'if %errorlevel% neq 0 (',
+    '  echo [ERROR] No se encontro Node.js instalado. Descargalo desde https://nodejs.org/',
+    '  if exist "ALDEA_IA_PORTABLE.html" (',
+    '    echo Abriendo version portable sin instalacion ALDEA_IA_PORTABLE.html ...',
+    '    start "" "ALDEA_IA_PORTABLE.html"',
+    '  )',
+    '  pause',
+    '  exit /b 1',
+    ')',
+    'set "NODE_ENV="',
+    'if not exist "node_modules\\vite\\bin\\vite.js" goto :install_deps',
+    'if not exist "node_modules\\tsx\\dist\\cli.mjs" goto :install_deps',
+    'goto :start_app',
+    ':install_deps',
+    'echo Instalando dependencias locales (esto puede demorar 1 minuto la primera vez)...',
+    'call npm install --include=dev --no-audit --no-fund',
+    'if %errorlevel% neq 0 (',
+    '  echo Reintentando instalacion con resolucion compatible...',
+    '  call npm install --include=dev --legacy-peer-deps --no-audit --no-fund',
+    ')',
+    'if not exist "node_modules\\vite\\bin\\vite.js" goto :install_failed',
+    'if not exist "node_modules\\tsx\\dist\\cli.mjs" goto :install_failed',
+    'goto :start_app',
+    ':install_failed',
+    'echo.',
+    'echo [ERROR] No se pudieron instalar Vite/TSX en node_modules.',
+    'echo Verifica tu conexion a internet o extrae el ZIP en una ruta simple como C:\\AldeaIA.',
+    'if exist "ALDEA_IA_PORTABLE.html" (',
+    '  echo Abriendo la version portable ALDEA_IA_PORTABLE.html en tu navegador...',
+    '  start "" "ALDEA_IA_PORTABLE.html"',
+    ')',
+    'pause',
+    'exit /b 1',
+    ':start_app',
+    'echo Iniciando Aldea IA en http://localhost:3000 ...',
+    'start "" cmd /c "timeout /t 2 /nobreak >nul & start "" http://localhost:3000"',
+    'call npm run dev',
+    'pause',
+    '',
+  ];
+  return lines.join('\r\n');
 }
 
 function buildUnixLauncher(): string {
   return `#!/usr/bin/env bash
 set -e
 cd "$(dirname "$0")"
-if [ ! -d "node_modules" ]; then
-  echo "Instalando dependencias por primera vez..."
-  npm install
+if [ ! -f "package.json" ]; then
+  echo "[ERROR] No se encontró package.json. Extraé el ZIP completo antes de ejecutar."
+  exit 1
+fi
+unset NODE_ENV
+if [ ! -f "node_modules/vite/bin/vite.js" ] || [ ! -f "node_modules/tsx/dist/cli.mjs" ]; then
+  echo "Instalando dependencias locales por primera vez..."
+  npm install --include=dev --no-audit --no-fund || npm install --include=dev --legacy-peer-deps --no-audit --no-fund
 fi
 echo "Iniciando Aldea IA en http://localhost:3000 ..."
 (sleep 2 && (xdg-open http://localhost:3000 2>/dev/null || open http://localhost:3000 2>/dev/null || true)) &
@@ -225,10 +275,34 @@ async function startServer() {
         rootFolder.file(file.relPath, fs.readFileSync(file.absPath));
       }
 
-      for (const rootFile of ['index.html', 'tsconfig.json', 'vite.config.ts']) {
+      for (const rootFile of ['index.html', 'tsconfig.json', 'vite.config.ts', 'server.ts']) {
         const abs = path.join(ROOT_DIR, rootFile);
         if (fs.existsSync(abs)) {
           rootFolder.file(rootFile, fs.readFileSync(abs));
+        }
+      }
+
+      const portableScript = path.join(ROOT_DIR, 'scripts', 'build-portable.mjs');
+      if (fs.existsSync(portableScript)) {
+        rootFolder.file('scripts/build-portable.mjs', fs.readFileSync(portableScript));
+      }
+
+      // Incluir también copia HTML portable lista para abrir sin Node/npm
+      const prebuiltPortable = path.join(ROOT_DIR, 'dist', 'aldea-ia-local.html');
+      if (fs.existsSync(prebuiltPortable)) {
+        rootFolder.file('ALDEA_IA_PORTABLE.html', fs.readFileSync(prebuiltPortable));
+      } else {
+        try {
+          const distAssetsDir = path.join(ROOT_DIR, 'dist', 'assets');
+          if (!fs.existsSync(distAssetsDir)) {
+            const { build } = await import('vite');
+            await build({ logLevel: 'silent' });
+          }
+          const { generatePortableHtml } = await import('./scripts/build-portable.mjs');
+          const portableHtml = await generatePortableHtml(ROOT_DIR);
+          rootFolder.file('ALDEA_IA_PORTABLE.html', portableHtml);
+        } catch (portableErr) {
+          console.warn('Aviso: no se pudo adjuntar ALDEA_IA_PORTABLE.html al ZIP:', portableErr);
         }
       }
 

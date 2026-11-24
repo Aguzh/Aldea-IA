@@ -62,6 +62,7 @@ import {
   MOUNTAIN_MIN_X,
   NIGHT_GAME_MINUTES,
   NIGHT_START_MINUTE,
+  NORTH_CENTER_Y,
   NORTH_LAND_MAX_Y,
   NORTH_LAND_MIN_Y,
   PETITION_INTERVAL_SECONDS,
@@ -75,6 +76,7 @@ import {
   ROAD_GRID_SIZE,
   SAFE_LAND_MIN_Y,
   shouldBuildHouse,
+  SOUTH_CENTER_Y,
   spawnFire,
   SPECIAL_BUILDING_LABELS,
   SPEED_TIMINGS,
@@ -88,7 +90,6 @@ import {
   withdrawResourceFromHouse,
   WOOD_GRADE_CONFIG,
   WORLD_CENTER_X,
-  WORLD_CENTER_Y,
 } from './rules';
 import type {
   Agent,
@@ -232,7 +233,7 @@ export function spawnSettlers(state: SimulationState, count: number): number {
       name,
       sex,
       WORLD_CENTER_X + (Math.random() - 0.5) * 220,
-      WORLD_CENTER_Y + (Math.random() - 0.5) * 160,
+      SOUTH_CENTER_Y + (Math.random() - 0.5) * 160,
       'Colono recién llegado',
       19 + (id % 8)
     );
@@ -376,7 +377,7 @@ export function createInitialState(): SimulationState {
         MALE_NAMES[i],
         'M',
         WORLD_CENTER_X - 190 + Math.random() * 380,
-        SAFE_LAND_MIN_Y + 130 + Math.random() * 260,
+        SAFE_LAND_MIN_Y + 90 + Math.random() * 200,
         null,
         20 + (i % 6)
       )
@@ -389,7 +390,7 @@ export function createInitialState(): SimulationState {
         FEMALE_NAMES[i],
         'F',
         WORLD_CENTER_X - 190 + Math.random() * 380,
-        SAFE_LAND_MIN_Y + 130 + Math.random() * 260,
+        SAFE_LAND_MIN_Y + 90 + Math.random() * 200,
         null,
         20 + ((i + 2) % 6)
       )
@@ -405,13 +406,13 @@ export function createInitialState(): SimulationState {
   const forestTypes: ResourceNode['type'][] = ['wood', 'wood', 'pine_wood', 'maple_wood', 'oak_wood', 'food'];
   for (let i = 0; i < 24; i++) {
     const t = forestTypes[i % forestTypes.length];
-    const inNorth = i % 8 === 0;
+    const inNorth = i % 3 === 0;
     spawnResource(
       state,
       t,
       40 + Math.random() * (FOREST_MAX_X - 60),
       inNorth
-        ? NORTH_LAND_MIN_Y + 12 + Math.random() * (NORTH_LAND_MAX_Y - NORTH_LAND_MIN_Y - 22)
+        ? NORTH_LAND_MIN_Y + 26 + Math.random() * (NORTH_LAND_MAX_Y - NORTH_LAND_MIN_Y - 52)
         : SAFE_LAND_MIN_Y + 24 + Math.random() * (CANVAS_HEIGHT - SAFE_LAND_MIN_Y - 72),
       true
     );
@@ -420,13 +421,13 @@ export function createInitialState(): SimulationState {
   const mountainTypes: ResourceNode['type'][] = ['stone', 'copper', 'iron', 'copper', 'silver', 'gold'];
   for (let i = 0; i < 24; i++) {
     const t = mountainTypes[i % mountainTypes.length];
-    const inNorth = i % 8 === 0;
+    const inNorth = i % 3 === 0;
     spawnResource(
       state,
       t,
       MOUNTAIN_MIN_X + 20 + Math.random() * (CANVAS_WIDTH - MOUNTAIN_MIN_X - 58),
       inNorth
-        ? NORTH_LAND_MIN_Y + 12 + Math.random() * (NORTH_LAND_MAX_Y - NORTH_LAND_MIN_Y - 22)
+        ? NORTH_LAND_MIN_Y + 26 + Math.random() * (NORTH_LAND_MAX_Y - NORTH_LAND_MIN_Y - 52)
         : SAFE_LAND_MIN_Y + 24 + Math.random() * (CANVAS_HEIGHT - SAFE_LAND_MIN_Y - 72),
       true
     );
@@ -434,11 +435,14 @@ export function createInitialState(): SimulationState {
 
   const valleyTypes: ResourceNode['type'][] = ['food', 'wood', 'stone', 'food', 'coins'];
   for (let i = 0; i < 16; i++) {
+    const inNorth = i % 3 === 0;
     spawnResource(
       state,
       valleyTypes[i % valleyTypes.length],
       FOREST_MAX_X + 45 + Math.random() * (MOUNTAIN_MIN_X - FOREST_MAX_X - 90),
-      SAFE_LAND_MIN_Y + 26 + Math.random() * (CANVAS_HEIGHT - SAFE_LAND_MIN_Y - 78),
+      inNorth
+        ? NORTH_LAND_MIN_Y + 32 + Math.random() * (NORTH_LAND_MAX_Y - NORTH_LAND_MIN_Y - 64)
+        : SAFE_LAND_MIN_Y + 26 + Math.random() * (CANVAS_HEIGHT - SAFE_LAND_MIN_Y - 78),
       true
     );
   }
@@ -451,21 +455,21 @@ export function createInitialState(): SimulationState {
       state,
       'fish',
       110 + i * 170,
-      RIVER_TOP_Y + 14 + (i % 3) * 14,
+      RIVER_TOP_Y + 14 + (i % 3) * 16,
       FISH_VARIANTS[i % FISH_VARIANTS.length]
     );
   }
-  createAnimal(state, 'cat', WORLD_CENTER_X - 75, WORLD_CENTER_Y + 15);
-  createAnimal(state, 'dog', WORLD_CENTER_X + 75, WORLD_CENTER_Y + 25);
-  createAnimal(state, 'chicken', 420, 460);
-  createAnimal(state, 'chicken', 450, 490);
-  createAnimal(state, 'cow', 490, 680);
-  createAnimal(state, 'cow', 555, 705);
-  createAnimal(state, 'horse', 960, 390);
-  createAnimal(state, 'horse', 1010, 610);
-  createAnimal(state, 'sheep', 980, 510);
-  createAnimal(state, 'wildcat', 140, 74);
-  createAnimal(state, 'bear', 1270, 72);
+  createAnimal(state, 'cat', WORLD_CENTER_X - 75, SOUTH_CENTER_Y - 15);
+  createAnimal(state, 'dog', WORLD_CENTER_X + 75, SOUTH_CENTER_Y + 15);
+  createAnimal(state, 'chicken', 420, SOUTH_CENTER_Y - 40);
+  createAnimal(state, 'chicken', 450, SOUTH_CENTER_Y - 10);
+  createAnimal(state, 'cow', 490, SOUTH_CENTER_Y + 50);
+  createAnimal(state, 'cow', 555, SOUTH_CENTER_Y + 80);
+  createAnimal(state, 'horse', 960, NORTH_CENTER_Y);
+  createAnimal(state, 'horse', 1010, SOUTH_CENTER_Y + 10);
+  createAnimal(state, 'sheep', 980, SOUTH_CENTER_Y - 60);
+  createAnimal(state, 'wildcat', 140, 180);
+  createAnimal(state, 'bear', 1270, 190);
 
   for (let i = 0; i < 120; i++) {
     state.rainDrops.push({
@@ -725,11 +729,12 @@ function chooseNextTask(state: SimulationState, agent: Agent, isNight = false): 
     return;
   }
 
-  // 9. Hambre media -> pescar (si no hay veda y hay stock), cultivar o recolectar
+  // 9. Hambre media -> pescar (respetando dueño exclusivo de muelle, veda y stock), cultivar o recolectar
   if (agent.hunger >= 48) {
-    const hasOperationalDock = isBuildingOperational(state, 'dock');
+    const canUseAnyDock =
+      state.specialBuildings.some((b) => b.type === 'dock' && b.isOperational && (b.ownerId === agent.id || b.ownerId === null));
     if (
-      hasOperationalDock &&
+      canUseAnyDock &&
       !isLawActive(state, 'ban_fishing') &&
       state.riverFishStock > 0 &&
       state.animals.some((a) => a.type === 'fish')
@@ -1050,7 +1055,7 @@ function tickAnimals(state: SimulationState, dt: number): void {
         if (d < 24 && predator.cooldown <= 0) {
           predator.cooldown = 55;
           predator.vx = Math.sign(predator.x - WORLD_CENTER_X || 1) * 1.4;
-          predator.vy = Math.sign(predator.y - WORLD_CENTER_Y || -1) * 1.2;
+          predator.vy = Math.sign(predator.y - SOUTH_CENTER_Y || -1) * 1.2;
           addLog(state, `${animal.name} ahuyentó a ${predator.name} lejos de los aldeanos.`, 'sky');
         }
         animal.walkFrame += 0.2 * dt;
@@ -1200,7 +1205,9 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
             childName,
             childSex,
             clamp(mother.x + 10, 30, CANVAS_WIDTH - 30),
-            clamp(mother.y + 10, SAFE_LAND_MIN_Y + 6, CANVAS_HEIGHT - 30),
+            mother.y < RIVER_TOP_Y
+              ? clamp(mother.y + 10, NORTH_LAND_MIN_Y + 6, NORTH_LAND_MAX_Y - 6)
+              : clamp(mother.y + 10, SAFE_LAND_MIN_Y + 6, CANVAS_HEIGHT - 30),
             father ? `${mother.name} & ${father.name}` : mother.name,
             0
           );
@@ -1239,9 +1246,9 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
               state,
               t,
               pickBiasedResourceX(t),
-              i % 4 === 0
-                ? NORTH_LAND_MIN_Y + 12 + Math.random() * 80
-                : SAFE_LAND_MIN_Y + 18 + Math.random() * (CANVAS_HEIGHT - SAFE_LAND_MIN_Y - 64)
+              i % 3 === 0
+                ? NORTH_LAND_MIN_Y + 26 + Math.random() * (NORTH_LAND_MAX_Y - NORTH_LAND_MIN_Y - 52)
+                : SAFE_LAND_MIN_Y + 20 + Math.random() * (CANVAS_HEIGHT - SAFE_LAND_MIN_Y - 64)
             );
           }
         }
@@ -1529,7 +1536,11 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
         const ty = targetWorkshop ? targetWorkshop.y + 10 : agent.y;
         const dist = targetWorkshop ? moveTowards(agent, tx, ty, moveSpeed, dt, currentBridgeX) : 0;
         if (dist <= 24 && agent.taskTimer <= 5) {
-          craftToolsForAgent(state, agent);
+          if ((agent.energy < 38 || agent.education < 35) && state.fires.length < 3 && Math.random() < 0.04) {
+            spawnFire(state, agent.x, agent.y, `Error accidental de ${agent.name} en la forja`, targetWorkshop ? 'special' : 'forest', targetWorkshop?.id);
+          } else {
+            craftToolsForAgent(state, agent);
+          }
           agent.taskTimer = 0;
         }
         break;
@@ -1541,13 +1552,16 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
           break;
         }
         // Dueño exclusivo en comercios/muelle/banco/taller: si no es dueño y ya tiene dueño otro, buscar otro local
-        if (b.ownerId !== null && b.ownerId !== agent.id && b.category === 'commerce') {
+        if (b.ownerId !== null && b.ownerId !== agent.id && (b.category === 'commerce' || b.type === 'dock')) {
           agent.assignedBuildingId = null;
           agent.taskTimer = 0;
           break;
         }
         const dist = moveTowards(agent, b.x, b.y + 12, moveSpeed, dt, currentBridgeX);
         if (dist <= 26 && agent.taskTimer <= 5) {
+          if ((b.type === 'forge' || b.type === 'bakery') && (agent.energy < 35 || agent.education < 28) && state.fires.length < 3 && Math.random() < 0.025) {
+            spawnFire(state, b.x, b.y, `Error accidental de ${agent.name} en ${b.name}`, 'special', b.id);
+          }
           advanceJobMastery(agent, agent.job, 2);
           const competitors = getCompetingBuildingCount(state, b.type);
           const competitionFactor = 1 / (1 + 0.35 * (competitors - 1));
@@ -1591,11 +1605,14 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
           agent.taskTimer = 0;
           break;
         }
-        // Dueño exclusivo del muelle si hay muelle propio, o pesca libre si no hay dueño que bloquee
+        // Respetar dueño exclusivo: si existe un muelle con dueño ajeno y no hay muelle libre, pesca en ribera alejada sin bono de muelle
         const myDock =
           state.specialBuildings.find((b) => b.type === 'dock' && b.isOperational && b.ownerId === agent.id) ??
           state.specialBuildings.find((b) => b.type === 'dock' && b.isOperational && b.ownerId === null);
-        const tx = myDock ? myDock.x : currentBridgeX ? currentBridgeX + 70 : agent.x;
+        const rawBankX = currentBridgeX ? currentBridgeX + 76 : clamp(agent.x, FOREST_MAX_X + 40, MOUNTAIN_MIN_X - 40);
+        const blockedByOtherDock =
+          !myDock && state.specialBuildings.some((b) => b.type === 'dock' && Math.abs(b.x - rawBankX) < 55);
+        const tx = myDock ? myDock.x : blockedByOtherDock ? clamp(rawBankX + 120, FOREST_MAX_X + 40, MOUNTAIN_MIN_X - 40) : rawBankX;
         const ty = myDock ? myDock.y - 8 : RIVER_BOTTOM_Y + 14;
         const dist = moveTowards(agent, tx, ty, moveSpeed, dt, currentBridgeX);
         if (dist <= 22 && agent.taskTimer <= 6) {
@@ -1613,12 +1630,12 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
             state.riverFishRestTimer = 55;
             addLog(state, 'Pesca sobreexplotada: el río entró en reposo para renovar peces.', 'amber');
           }
-          agent.inv.food += 2;
-          const dockBonus = myDock ? Math.max(2, Math.round(4 / getCompetingBuildingCount(state, 'dock'))) : 2;
+          agent.inv.food += myDock ? 2 : 1;
+          const dockBonus = myDock ? Math.max(2, Math.round(4 / getCompetingBuildingCount(state, 'dock'))) : 1;
           agent.coins += mintBackedCoins(state, dockBonus);
           advanceJobMastery(agent, 'Pescador', 3);
           state.knowledge += 1;
-          addLog(state, `${agent.name} pescó en el río (+2 comida · stock río: ${state.riverFishStock}/${state.riverFishMaxStock}).`, 'sky');
+          addLog(state, `${agent.name} pescó en el río (+${myDock ? 2 : 1} comida · stock río: ${state.riverFishStock}/${state.riverFishMaxStock}).`, 'sky');
           agent.taskTimer = 0;
         }
         break;
@@ -2074,11 +2091,14 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
       case 'socialize':
       case 'idle':
       case 'eat': {
-        const anchorX = state.plaza ? state.plaza.x : WORLD_CENTER_X;
-        const anchorY = state.plaza ? state.plaza.y : WORLD_CENTER_Y + 60;
+        const stayNorth = agent.y < RIVER_TOP_Y && currentBridgeX === null;
+        const anchorX = state.plaza && !stayNorth ? state.plaza.x : WORLD_CENTER_X;
+        const anchorY = stayNorth ? NORTH_CENTER_Y : state.plaza ? state.plaza.y : SOUTH_CENTER_Y;
         const angle = (agent.id * 1.7 + state.minute * 0.01) % (Math.PI * 2);
         const tx = clamp(anchorX + Math.cos(angle) * 180, 48, CANVAS_WIDTH - 48);
-        const ty = clamp(anchorY + Math.sin(angle) * 130, SAFE_LAND_MIN_Y + 18, CANVAS_HEIGHT - 48);
+        const ty = stayNorth
+          ? clamp(anchorY + Math.sin(angle) * 90, NORTH_LAND_MIN_Y + 18, NORTH_LAND_MAX_Y - 18)
+          : clamp(anchorY + Math.sin(angle) * 130, SAFE_LAND_MIN_Y + 18, CANVAS_HEIGHT - 48);
         moveTowards(agent, tx, ty, moveSpeed * 0.55, dt, currentBridgeX);
         break;
       }
@@ -2285,7 +2305,7 @@ function drawLeftForestAndRightMountains(
   ctx.fillText('MONTAÑAS (Minerales)', CANVAS_WIDTH - 16, 19);
 }
 
-function drawTopRiver(
+function drawCenterRiver(
   ctx: CanvasRenderingContext2D,
   minute: number,
   season: SimulationState['season'],
@@ -2293,41 +2313,58 @@ function drawTopRiver(
   isBridgeSelected: boolean
 ): void {
   const isWinter = season === 'Invierno';
+  // Riberas arenosas / empedradas superior e inferior
   ctx.fillStyle = isWinter ? '#cbd5e1' : '#b48a5a';
-  ctx.fillRect(0, RIVER_TOP_Y - 5, CANVAS_WIDTH, RIVER_BOTTOM_Y - RIVER_TOP_Y + 10);
+  ctx.fillRect(0, RIVER_TOP_Y - 7, CANVAS_WIDTH, RIVER_BOTTOM_Y - RIVER_TOP_Y + 14);
+  ctx.fillStyle = isWinter ? '#94a3b8' : '#855e3c';
+  ctx.fillRect(0, RIVER_TOP_Y - 3, CANVAS_WIDTH, RIVER_BOTTOM_Y - RIVER_TOP_Y + 6);
 
+  // Cauce central profundo
   ctx.fillStyle = isWinter ? '#7dd3fc' : '#1d4ed8';
   ctx.fillRect(0, RIVER_TOP_Y, CANVAS_WIDTH, RIVER_BOTTOM_Y - RIVER_TOP_Y);
 
   ctx.fillStyle = isWinter ? '#93c5fd' : '#2563eb';
-  ctx.fillRect(0, RIVER_TOP_Y + 10, CANVAS_WIDTH, RIVER_BOTTOM_Y - RIVER_TOP_Y - 20);
+  ctx.fillRect(0, RIVER_TOP_Y + 12, CANVAS_WIDTH, RIVER_BOTTOM_Y - RIVER_TOP_Y - 24);
 
   const shift = Math.floor(minute * 1.4) % 48;
   ctx.fillStyle = isWinter ? '#e0f2fe' : '#60a5fa';
   for (let rx = -48 + shift; rx < CANVAS_WIDTH + 48; rx += 48) {
-    ctx.fillRect(rx, RIVER_TOP_Y + 7, 16, 3);
-    ctx.fillRect(rx + 20, RIVER_TOP_Y + 23, 18, 3);
-    ctx.fillRect(rx + 8, RIVER_TOP_Y + 37, 14, 2);
+    ctx.fillRect(rx, RIVER_TOP_Y + 8, 16, 3);
+    ctx.fillRect(rx + 20, RIVER_TOP_Y + 28, 18, 3);
+    ctx.fillRect(rx + 8, RIVER_TOP_Y + 48, 14, 2);
   }
+
+  // Etiquetas sutiles Zona Norte / Zona Sur para orientar al jugador
+  ctx.fillStyle = 'rgba(15, 23, 42, 0.65)';
+  ctx.fillRect(WORLD_CENTER_X - 42, RIVER_TOP_Y - 24, 84, 13);
+  ctx.fillRect(WORLD_CENTER_X - 38, RIVER_BOTTOM_Y + 11, 76, 13);
+  ctx.fillStyle = '#e2e8f0';
+  ctx.font = 'bold 8px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('ZONA NORTE', WORLD_CENTER_X, RIVER_TOP_Y - 14);
+  ctx.fillText('ZONA SUR', WORLD_CENTER_X, RIVER_BOTTOM_Y + 21);
 
   if (bridge) {
     const bxMin = bridge.x - BRIDGE_HALF_WIDTH;
     const bridgeW = BRIDGE_HALF_WIDTH * 2;
-    ctx.fillStyle = 'rgba(0,0,0,0.28)';
-    ctx.fillRect(bxMin - 2, RIVER_TOP_Y - 2, bridgeW + 4, RIVER_BOTTOM_Y - RIVER_TOP_Y + 8);
+    ctx.fillStyle = 'rgba(0,0,0,0.32)';
+    ctx.fillRect(bxMin - 3, RIVER_TOP_Y - 2, bridgeW + 6, RIVER_BOTTOM_Y - RIVER_TOP_Y + 10);
+    ctx.fillStyle = '#475569';
+    ctx.fillRect(bxMin - 3, RIVER_TOP_Y - 8, 6, RIVER_BOTTOM_Y - RIVER_TOP_Y + 16);
+    ctx.fillRect(bxMin + bridgeW - 3, RIVER_TOP_Y - 8, 6, RIVER_BOTTOM_Y - RIVER_TOP_Y + 16);
     ctx.fillStyle = '#78350f';
-    ctx.fillRect(bxMin, RIVER_TOP_Y - 5, bridgeW, RIVER_BOTTOM_Y - RIVER_TOP_Y + 10);
+    ctx.fillRect(bxMin, RIVER_TOP_Y - 6, bridgeW, RIVER_BOTTOM_Y - RIVER_TOP_Y + 12);
     ctx.fillStyle = '#92400e';
-    for (let by = RIVER_TOP_Y - 3; by <= RIVER_BOTTOM_Y + 1; by += 6) {
+    for (let by = RIVER_TOP_Y - 4; by <= RIVER_BOTTOM_Y + 2; by += 6) {
       ctx.fillRect(bxMin + 3, by, bridgeW - 6, 4);
     }
     ctx.fillStyle = '#451a03';
-    ctx.fillRect(bxMin, RIVER_TOP_Y - 5, 4, RIVER_BOTTOM_Y - RIVER_TOP_Y + 10);
-    ctx.fillRect(bxMin + bridgeW - 4, RIVER_TOP_Y - 5, 4, RIVER_BOTTOM_Y - RIVER_TOP_Y + 10);
+    ctx.fillRect(bxMin, RIVER_TOP_Y - 6, 4, RIVER_BOTTOM_Y - RIVER_TOP_Y + 12);
+    ctx.fillRect(bxMin + bridgeW - 4, RIVER_TOP_Y - 6, 4, RIVER_BOTTOM_Y - RIVER_TOP_Y + 12);
     if (isBridgeSelected) {
       ctx.strokeStyle = '#facc15';
       ctx.lineWidth = 2;
-      ctx.strokeRect(bxMin - 3, RIVER_TOP_Y - 8, bridgeW + 6, RIVER_BOTTOM_Y - RIVER_TOP_Y + 16);
+      ctx.strokeRect(bxMin - 4, RIVER_TOP_Y - 10, bridgeW + 8, RIVER_BOTTOM_Y - RIVER_TOP_Y + 20);
     }
   }
 }
@@ -2984,24 +3021,36 @@ function drawPixelAgent(ctx: CanvasRenderingContext2D, agent: Agent, selectedId:
   ctx.fillStyle = '#1e293b';
   ctx.fillRect(-4, 4 + step, 3, 6);
   ctx.fillRect(1, 4 - step, 3, 6);
+  ctx.fillStyle = '#451a03';
+  ctx.fillRect(-4, 8 + step, 3, 2);
+  ctx.fillRect(1, 8 - step, 3, 2);
 
   if (!agent.isChild && agent.sex === 'F') {
-    // Mujer: silueta sutil de vestido / falda acampanada
+    // Mujer: silueta definida de vestido / falda acampanada con lazo y cuello
     ctx.fillStyle = agent.shirt;
     ctx.fillRect(-4, -4, 8, 6);
-    ctx.fillRect(-6, 1, 12, 4);
+    ctx.fillRect(-6, 1, 12, 5);
+    ctx.fillStyle = '#f8fafc';
+    ctx.fillRect(-2, -4, 4, 2);
     ctx.fillStyle = '#f472b6';
-    ctx.fillRect(-4, 0, 8, 1); // cinturón sutil
+    ctx.fillRect(-4, 0, 8, 1);
   } else if (!agent.isChild && agent.sex === 'M') {
-    // Hombre: hombros ligeramente más anchos y pantalón definido
+    // Hombre: hombros anchos, chaleco y cinturón con hebilla
     ctx.fillStyle = agent.shirt;
     ctx.fillRect(-5, -4, 10, 8);
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.25)';
+    ctx.fillRect(-5, -4, 2, 7);
+    ctx.fillRect(3, -4, 2, 7);
     ctx.fillStyle = '#0f172a';
-    ctx.fillRect(-5, 3, 10, 2); // cinturón
+    ctx.fillRect(-5, 3, 10, 2);
+    ctx.fillStyle = '#facc15';
+    ctx.fillRect(-1, 3, 2, 2);
   } else {
-    // Niño/a: túnica compacta
+    // Niño/a: túnica compacta con peto y proporción infantil
     ctx.fillStyle = agent.shirt;
     ctx.fillRect(-4, -3, 8, 7);
+    ctx.fillStyle = '#e2e8f0';
+    ctx.fillRect(-2, -3, 4, 2);
   }
 
   ctx.fillStyle = agent.isSick ? '#cbd5e1' : agent.skin;
@@ -3011,12 +3060,21 @@ function drawPixelAgent(ctx: CanvasRenderingContext2D, agent: Agent, selectedId:
   ctx.fillStyle = agent.isSick ? '#d9e3d8' : agent.skin;
   ctx.fillRect(-4, -12, 8, 8);
 
+  if (!agent.isChild && agent.sex === 'M' && agent.id % 3 === 0) {
+    ctx.fillStyle = agent.isElder ? '#cbd5e1' : agent.hairColor;
+    ctx.fillRect(-3, -6, 6, 2);
+  }
+
   ctx.fillStyle = '#0f172a';
   ctx.fillRect(-2, -9, 1, 2);
   ctx.fillRect(2, -9, 1, 2);
 
   ctx.fillStyle = agent.isElder ? '#e2e8f0' : agent.hairColor;
-  if (agent.hairStyle === 'short') {
+  if (agent.isChild && agent.id % 2 === 0) {
+    ctx.fillStyle = '#38bdf8';
+    ctx.fillRect(-4, -14, 8, 3);
+    ctx.fillRect(-2, -15, 4, 2);
+  } else if (agent.hairStyle === 'short') {
     ctx.fillRect(-4, -14, 8, 3);
   } else if (agent.hairStyle === 'long') {
     ctx.fillRect(-5, -14, 10, 3);
@@ -3164,7 +3222,7 @@ export function renderWorld(
   }
 
   drawLeftForestAndRightMountains(ctx, state.season);
-  drawTopRiver(ctx, state.minute, state.season, state.bridge, state.selectedEntity?.kind === 'bridge');
+  drawCenterRiver(ctx, state.minute, state.season, state.bridge, state.selectedEntity?.kind === 'bridge');
 
   if (state.roads.length > 0) {
     drawRoads(ctx, state.roads);
