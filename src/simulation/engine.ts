@@ -1,6 +1,5 @@
 import {
   addLog,
-  addPreciousMetalToReserve,
   addRoadTile,
   advanceDayAging,
   advanceJobMastery,
@@ -11,27 +10,22 @@ import {
   BRIDGE_HALF_WIDTH,
   canAgentRest,
   canAgentsReproduce,
-  canCarpenterUseWood,
+  cancelActiveConstruction,
   canGatherOrTradeMineral,
   canGatherOrTradeWood,
   CANVAS_HEIGHT,
   CANVAS_WIDTH,
   clamp,
+  completeActiveConstruction,
   computeAgentHappiness,
   computeAgentImportance,
   computeEra,
   computeSeason,
   computeUnlockedSkills,
-  consumeConstructionResources,
   contractDiseaseForAgent,
   craftToolsForAgent,
   createAnimal,
-  createBridge,
   createDefaultLaws,
-  createFarmPlot,
-  createHouseNearCenter,
-  createPlaza,
-  createSpecialBuilding,
   createVillagePetition,
   DAY_GAME_MINUTES,
   DAY_START_MINUTE,
@@ -50,9 +44,10 @@ import {
   getCompetingBuildingCount,
   getConciseTaskLabel,
   getEmotionWorkMultiplier,
+  getOperationalDepots,
   grantBankLoan,
-  hasAvailableOperatorForBuilding,
   interpretQwenDirective,
+  isBridgePassable,
   isBuildingOperational,
   isLawActive,
   isNearRoad,
@@ -68,10 +63,14 @@ import {
   PETITION_INTERVAL_SECONDS,
   pickQwenBabyName,
   PREGNANCY_DAYS,
+  PRODUCTION_INPUT_COSTS,
   recalculateEconomyReserve,
   recordDailySnapshot,
+  recordResourceOperation,
   repairDamagedStructures,
+  resolvePetitionWithQwen,
   RIVER_BOTTOM_Y,
+  RIVER_FISH_RESTOCK_DAYS,
   RIVER_TOP_Y,
   ROAD_GRID_SIZE,
   SAFE_LAND_MIN_Y,
@@ -80,13 +79,14 @@ import {
   spawnFire,
   SPECIAL_BUILDING_LABELS,
   SPEED_TIMINGS,
+  startConstructionProject,
   switchPartnerForAgent,
   syncAgentSkills,
   syncSpecialBuildingStaff,
   tameWildAnimal,
   transferInheritance,
   triggerLightningStorm,
-  upgradeLowestHouse,
+  validateAndComputeConstructionPlan,
   withdrawResourceFromHouse,
   WOOD_GRADE_CONFIG,
   WORLD_CENTER_X,
@@ -98,6 +98,8 @@ import type {
   FarmPlot,
   House,
   QwenAction,
+  ResourceCostMap,
+  ResourceInventory,
   ResourceNode,
   RoadTile,
   SimulationState,
@@ -218,6 +220,7 @@ export function createAgent(
     walkFrame: 0,
     reproductionCooldown: 0,
     moodModifier: 0,
+    activeConstruction: null,
   };
 }
 
@@ -265,7 +268,7 @@ export function spawnResource(
   if (isPointInRiverWater(finalX, finalY, state.bridge?.x ?? null)) {
     finalY = SAFE_LAND_MIN_Y + 12;
   }
-  const maxAmt = 6;
+  const maxAmt = 8;
   state.resources.push({
     id: state.nextId++,
     type,
@@ -304,6 +307,10 @@ export function createInitialState(): SimulationState {
     biome: 'grassland',
     weather: 'sunny',
     tool: 'inspect',
+    selectedRoadType: 'dirt',
+    selectedRoadLamp: false,
+    roadMaintenanceLastDay: 1,
+    roadUnpaidMaintenanceDays: 0,
     selectedAgentId: null,
     selectedEntity: null,
     highlightFamilyAgentId: null,
@@ -330,6 +337,7 @@ export function createInitialState(): SimulationState {
     representativeAgentId: null,
     petitionTimerSec: PETITION_INTERVAL_SECONDS,
     pendingPetition: null,
+    qwenAutoRespondPetitions: false,
     autoPausedByPetition: false,
     previousSpeedBeforePetition: 1,
     lightningFlashTimer: 0,
@@ -360,6 +368,7 @@ export function createInitialState(): SimulationState {
       model: 'qwen2.5:3b',
     },
     logs: [],
+    resourceLedger: [],
     qwenMessages: [
       {
         id: 1,
@@ -404,9 +413,9 @@ export function createInitialState(): SimulationState {
   }
 
   const forestTypes: ResourceNode['type'][] = ['wood', 'wood', 'pine_wood', 'maple_wood', 'oak_wood', 'food'];
-  for (let i = 0; i < 24; i++) {
+  for (let i = 0; i < 30; i++) {
     const t = forestTypes[i % forestTypes.length];
-    const inNorth = i % 3 === 0;
+    const inNorth = i % 4 === 0;
     spawnResource(
       state,
       t,
@@ -419,9 +428,9 @@ export function createInitialState(): SimulationState {
   }
 
   const mountainTypes: ResourceNode['type'][] = ['stone', 'copper', 'iron', 'copper', 'silver', 'gold'];
-  for (let i = 0; i < 24; i++) {
+  for (let i = 0; i < 30; i++) {
     const t = mountainTypes[i % mountainTypes.length];
-    const inNorth = i % 3 === 0;
+    const inNorth = i % 4 === 0;
     spawnResource(
       state,
       t,
@@ -433,9 +442,9 @@ export function createInitialState(): SimulationState {
     );
   }
 
-  const valleyTypes: ResourceNode['type'][] = ['food', 'wood', 'stone', 'food', 'coins'];
-  for (let i = 0; i < 16; i++) {
-    const inNorth = i % 3 === 0;
+  const valleyTypes: ResourceNode['type'][] = ['food', 'wood', 'stone', 'copper', 'food', 'coins'];
+  for (let i = 0; i < 18; i++) {
+    const inNorth = i % 4 === 0;
     spawnResource(
       state,
       valleyTypes[i % valleyTypes.length],
@@ -512,7 +521,7 @@ function findClosestResource(
   agent: Agent,
   type: ResourceNode['type'] | null
 ): ResourceNode | null {
-  const hasBridge = state.bridge !== null;
+  const hasBridge = isBridgePassable(state);
   const agentNorth = agent.y < RIVER_TOP_Y;
   let closest: ResourceNode | null = null;
   let minDist = Infinity;
@@ -553,28 +562,51 @@ function getTaskForResource(type: ResourceNode['type']): TaskType {
   }
 }
 
-function hasEnoughVillageResources(
+function hasEnoughBuilderOrDepotResources(
   state: SimulationState,
-  woodNeed: number,
-  stoneNeed = 0
+  builder: Agent,
+  reqs: ResourceCostMap
 ): boolean {
-  const totalWood =
-    state.agents.reduce(
-      (acc, a) => acc + a.inv.wood + a.inv.pineWood + a.inv.mapleWood + a.inv.oakWood,
-      0
-    ) +
-    state.specialBuildings.reduce(
-      (acc, b) => acc + b.storage.wood + b.storage.pineWood + b.storage.mapleWood + b.storage.oakWood,
-      0
-    );
-  const totalStone =
-    state.agents.reduce((acc, a) => acc + a.inv.stone, 0) +
-    state.specialBuildings.reduce((acc, b) => acc + b.storage.stone, 0);
-  return totalWood >= woodNeed && totalStone >= stoneNeed;
+  const depots = getOperationalDepots(state);
+  for (const [rawKey, rawNeed] of Object.entries(reqs)) {
+    const key = rawKey as keyof ResourceInventory;
+    const need = rawNeed ?? 0;
+    if (need <= 0) continue;
+    const avail = builder.inv[key] + depots.reduce((acc, d) => acc + d.storage[key], 0);
+    if (avail < need) return false;
+  }
+  return true;
+}
+
+function findMissingMaterialNodeType(
+  state: SimulationState,
+  builder: Agent,
+  reqs: ResourceCostMap
+): ResourceNode['type'] | null {
+  const depots = getOperationalDepots(state);
+  const mapToNode: Partial<Record<keyof ResourceInventory, ResourceNode['type']>> = {
+    wood: 'wood',
+    pineWood: 'pine_wood',
+    mapleWood: 'maple_wood',
+    oakWood: 'oak_wood',
+    stone: 'stone',
+    copper: 'copper',
+    iron: 'iron',
+  };
+  for (const [rawKey, rawNeed] of Object.entries(reqs)) {
+    const key = rawKey as keyof ResourceInventory;
+    const need = rawNeed ?? 0;
+    if (need <= 0) continue;
+    const avail = builder.inv[key] + depots.reduce((acc, d) => acc + d.storage[key], 0);
+    if (avail < need && mapToNode[key]) {
+      return mapToNode[key]!;
+    }
+  }
+  return null;
 }
 
 function tryOrganicRoadConstruction(state: SimulationState, agent: Agent): boolean {
-  if (state.knowledge < 14 || agent.isChild) return false;
+  if (state.knowledge < 14 || agent.isChild || agent.job !== 'Constructor') return false;
   if (state.roads.length >= 140) return false;
   if (isNearRoad(state.roads, agent.x, agent.y)) return false;
 
@@ -584,13 +616,15 @@ function tryOrganicRoadConstruction(state: SimulationState, agent: Agent): boole
     state.specialBuildings.some((b) => Math.hypot(agent.x - b.x, agent.y - b.y) < 95);
   if (!nearHub) return false;
 
-  const canPay = agent.inv.stone > 0 || agent.inv.wood > 0;
-  if (!canPay) return false;
-
-  const tile = addRoadTile(state, agent.x, agent.y);
+  const tile = addRoadTile(
+    state,
+    agent.x,
+    agent.y,
+    state.selectedRoadType ?? 'dirt',
+    state.selectedRoadLamp ?? false,
+    agent
+  );
   if (!tile) return false;
-  if (agent.inv.stone > 0) agent.inv.stone -= 1;
-  else if (agent.inv.wood > 0) agent.inv.wood -= 1;
   agent.constructionKnowledge = clamp(agent.constructionKnowledge + 1, 0, 100);
   return true;
 }
@@ -680,28 +714,40 @@ function chooseNextTask(state: SimulationState, agent: Agent, isNight = false): 
     return;
   }
 
-  // 5. Reparación de edificios con desgaste
+  // 5. Reparación de edificios con desgaste o deuda de mantenimiento
   const needsRepair =
-    state.houses.some((h) => h.durability < 72) ||
-    state.specialBuildings.some((b) => b.durability < 72) ||
-    (state.bridge !== null && state.bridge.durability < 72);
+    state.houses.some((h) => h.durability < 72 || h.maintenanceStatus !== 'ok') ||
+    state.specialBuildings.some((b) => b.durability < 72 || b.maintenanceStatus !== 'ok') ||
+    (state.bridge !== null && (state.bridge.durability < 72 || state.bridge.maintenanceStatus !== 'ok'));
   if (
     needsRepair &&
     !agent.isChild &&
     (agent.job === 'Carpintero' || agent.job === 'Constructor') &&
-    hasEnoughVillageResources(state, 1, 0)
+    hasEnoughBuilderOrDepotResources(state, agent, { wood: 1 })
   ) {
     setAgentTask(agent, 'repair_building', 34);
     return;
   }
 
-  // 6. Fabricar herramientas (36%+ Saber)
-  const hasToolMat =
-    agent.inv.iron > 0 ||
-    agent.inv.copper > 0 ||
-    agent.inv.wood >= 2 ||
-    (canCarpenterUseWood(agent, 'pine') && agent.inv.pineWood >= 2);
-  if (!agent.isChild && agent.education >= 36 && agent.toolsCount < 2 && hasToolMat && Math.random() < 0.32) {
+  // 6. Fabricar herramientas (36%+ Saber · 1 Cobre + 1 Hierro estricto)
+  const forgesOp = state.specialBuildings.filter((b) => b.type === 'forge' && b.isOperational);
+  const depotsOp = getOperationalDepots(state);
+  const availCopper =
+    agent.inv.copper +
+    forgesOp.reduce((acc, f) => acc + f.storage.copper, 0) +
+    depotsOp.reduce((acc, d) => acc + d.storage.copper, 0);
+  const availIron =
+    agent.inv.iron +
+    forgesOp.reduce((acc, f) => acc + f.storage.iron, 0) +
+    depotsOp.reduce((acc, d) => acc + d.storage.iron, 0);
+  if (
+    !agent.isChild &&
+    agent.education >= 36 &&
+    agent.toolsCount < 2 &&
+    availCopper >= (PRODUCTION_INPUT_COSTS.forgeTool.copper ?? 1) &&
+    availIron >= (PRODUCTION_INPUT_COSTS.forgeTool.iron ?? 1) &&
+    Math.random() < 0.32
+  ) {
     setAgentTask(agent, 'craft_tools', 28);
     return;
   }
@@ -822,71 +868,143 @@ function chooseNextTask(state: SimulationState, agent: Agent, isNight = false): 
     return;
   }
 
-  // 10. Construcción autónoma inteligente (sin casas innecesarias ni edificios sin operario)
-  const canConstruct = agent.job === 'Constructor' || state.policies.buildPriority || agent.houseId === null;
-  if (canConstruct && !agent.isChild) {
-    const hasOperationalCarpentry = isBuildingOperational(state, 'carpentry');
-    const houseWoodNeed = hasOperationalCarpentry ? 3 : 4;
-    if (shouldBuildHouse(state) && hasEnoughVillageResources(state, houseWoodNeed, 0)) {
-      decideVillagerMajorAction(state, agent, 'construction', { chosenBuilding: 'house' });
-      setAgentTask(agent, 'build_house', 42);
+  // 10. Construcción autónoma inteligente: SOLO rol Constructor y con materiales reales exactos
+  if (agent.job === 'Constructor' && !agent.isChild) {
+    // Si tiene obra iniciada pendiente (ej. pausada durante la noche), reanudarla primero
+    if (agent.activeConstruction) {
+      const acKind = agent.activeConstruction.kind;
+      const resumeTask: TaskType =
+        acKind === 'house'
+          ? 'build_house'
+          : acKind === 'upgrade_house'
+            ? 'upgrade_house'
+            : acKind === 'plaza'
+              ? 'build_plaza'
+              : acKind === 'bridge'
+                ? 'build_bridge'
+                : acKind === 'farm'
+                  ? 'plant_farm'
+                  : 'build_special';
+      setAgentTask(agent, resumeTask, 40);
       return;
     }
-    if (state.plaza === null && state.houses.length >= 2 && hasEnoughVillageResources(state, 6, 6)) {
-      decideVillagerMajorAction(state, agent, 'construction', { chosenBuilding: 'plaza' });
-      setAgentTask(agent, 'build_plaza', 46);
-      return;
+
+    if (shouldBuildHouse(state)) {
+      const zone: 'south' | 'north' =
+        isBridgePassable(state) &&
+        state.houses.length >= 4 &&
+        state.houses.filter((h) => h.zone === 'north').length < 4
+          ? 'north'
+          : 'south';
+      const plan = validateAndComputeConstructionPlan(state, agent, 'house', { zone });
+      if (plan.ok && hasEnoughBuilderOrDepotResources(state, agent, plan.cost)) {
+        const started = startConstructionProject(state, agent, 'house', { zone, duration: 36 });
+        if (started.ok) {
+          decideVillagerMajorAction(state, agent, 'construction', { chosenBuilding: 'house' });
+          setAgentTask(agent, 'build_house', 42);
+          return;
+        }
+      }
     }
-    if (state.bridge === null && hasEnoughVillageResources(state, 6, 4) && (state.houses.length >= 2 || state.knowledge >= 18)) {
-      decideVillagerMajorAction(state, agent, 'construction', { chosenBuilding: 'bridge' });
-      setAgentTask(agent, 'build_bridge', 46);
-      return;
+
+    if (state.plaza === null && state.houses.length >= 2) {
+      const plan = validateAndComputeConstructionPlan(state, agent, 'plaza');
+      if (plan.ok && hasEnoughBuilderOrDepotResources(state, agent, plan.cost)) {
+        const started = startConstructionProject(state, agent, 'plaza', { duration: 42 });
+        if (started.ok) {
+          decideVillagerMajorAction(state, agent, 'construction', { chosenBuilding: 'plaza' });
+          setAgentTask(agent, 'build_plaza', 46);
+          return;
+        }
+      }
     }
-    if (state.farms.length < 2 && hasEnoughVillageResources(state, 3, 0) && Math.random() < 0.45) {
-      decideVillagerMajorAction(state, agent, 'construction', { chosenBuilding: 'farm' });
-      setAgentTask(agent, 'plant_farm', 38);
-      return;
+
+    if (state.bridge === null && (state.houses.length >= 2 || state.knowledge >= 18)) {
+      const plan = validateAndComputeConstructionPlan(state, agent, 'bridge');
+      if (plan.ok && hasEnoughBuilderOrDepotResources(state, agent, plan.cost)) {
+        const started = startConstructionProject(state, agent, 'bridge', { duration: 44 });
+        if (started.ok) {
+          decideVillagerMajorAction(state, agent, 'construction', { chosenBuilding: 'bridge' });
+          setAgentTask(agent, 'build_bridge', 46);
+          return;
+        }
+      }
     }
-    if (state.knowledge >= 22 && hasEnoughVillageResources(state, 5, 3)) {
+
+    if (state.farms.length < 2 && Math.random() < 0.45) {
+      const plan = validateAndComputeConstructionPlan(state, agent, 'farm', { farmSize: 'small' });
+      if (plan.ok && hasEnoughBuilderOrDepotResources(state, agent, plan.cost)) {
+        const started = startConstructionProject(state, agent, 'farm', {
+          farmSize: 'small',
+          duration: 32,
+        });
+        if (started.ok) {
+          decideVillagerMajorAction(state, agent, 'construction', { chosenBuilding: 'farm' });
+          setAgentTask(agent, 'plant_farm', 38);
+          return;
+        }
+      }
+    }
+
+    if (state.knowledge >= 22) {
       const order: SpecialBuildingType[] = [
-        'dock',
         'general_depot',
+        'dock',
         'market',
-        'bank',
-        'school',
-        'infirmary',
         'bakery',
         'carpentry',
+        'school',
+        'infirmary',
         'forge',
         'apothecary',
+        'bank',
         'town_hall',
         'police_station',
         'prison',
       ];
-      const nextSpecial = order.find(
-        (t) =>
-          !state.specialBuildings.some((b) => b.type === t) &&
-          hasAvailableOperatorForBuilding(state, t)
-      );
-      if (nextSpecial) {
-        decideVillagerMajorAction(state, agent, 'construction', { chosenBuilding: nextSpecial });
-        setAgentTask(agent, 'build_special', 44);
-        return;
+      for (const t of order) {
+        if (state.specialBuildings.some((b) => b.type === t)) continue;
+        const plan = validateAndComputeConstructionPlan(state, agent, 'special', { specialType: t });
+        if (plan.ok && hasEnoughBuilderOrDepotResources(state, agent, plan.cost)) {
+          const started = startConstructionProject(state, agent, 'special', {
+            specialType: t,
+            duration: 40,
+          });
+          if (started.ok) {
+            decideVillagerMajorAction(state, agent, 'construction', { chosenBuilding: t });
+            setAgentTask(agent, 'build_special', 44);
+            return;
+          }
+        }
       }
     }
-    if (
-      hasEnoughVillageResources(state, 3, 2) &&
-      state.houses.some((h) => h.level < ERA_METADATA[state.era].maxHouseLevel)
-    ) {
-      decideVillagerMajorAction(state, agent, 'construction', { chosenBuilding: 'upgrade' });
-      setAgentTask(agent, 'upgrade_house', 42);
-      return;
-    }
-  }
 
-  if (agent.job === 'Constructor') {
-    const neededType: ResourceNode['type'] = !hasEnoughVillageResources(state, 6, 0) ? 'wood' : 'stone';
-    const res = findClosestResource(state, agent, neededType) ?? findClosestResource(state, agent, null);
+    if (state.houses.some((h) => h.level < ERA_METADATA[state.era].maxHouseLevel)) {
+      const plan = validateAndComputeConstructionPlan(state, agent, 'upgrade_house');
+      if (plan.ok && hasEnoughBuilderOrDepotResources(state, agent, plan.cost)) {
+        const started = startConstructionProject(state, agent, 'upgrade_house', { duration: 36 });
+        if (started.ok) {
+          decideVillagerMajorAction(state, agent, 'construction', { chosenBuilding: 'upgrade' });
+          setAgentTask(agent, 'upgrade_house', 42);
+          return;
+        }
+      }
+    }
+
+    // Si faltan materiales para la próxima obra prioritaria, ir a recolectarlos
+    const nextPlan = shouldBuildHouse(state)
+      ? validateAndComputeConstructionPlan(state, agent, 'house')
+      : state.plaza === null
+        ? validateAndComputeConstructionPlan(state, agent, 'plaza')
+        : state.bridge === null
+          ? validateAndComputeConstructionPlan(state, agent, 'bridge')
+          : null;
+    const missingNode = nextPlan ? findMissingMaterialNodeType(state, agent, nextPlan.cost) : 'wood';
+    const res =
+      (missingNode ? findClosestResource(state, agent, missingNode) : null) ??
+      findClosestResource(state, agent, 'wood') ??
+      findClosestResource(state, agent, 'stone') ??
+      findClosestResource(state, agent, null);
     if (res) {
       setAgentTask(agent, getTaskForResource(res.type), 34, res.id);
       return;
@@ -995,20 +1113,13 @@ function tickAnimals(state: SimulationState, dt: number): void {
   const fishCount = state.animals.filter((a) => a.type === 'fish').length;
   const hasOperationalSchool = isBuildingOperational(state, 'school');
 
-  // Renovación del cardumen SOLO después de reposar sin sobreexplotación
-  if (state.riverFishRestTimer > 0) {
-    state.riverFishRestTimer = Math.max(0, state.riverFishRestTimer - 0.04 * dt);
-    if (state.riverFishRestTimer <= 0) {
-      state.riverFishStock = state.riverFishMaxStock;
-      addLog(state, 'El río reposó y se renovó el cardumen de peces.', 'sky');
-    }
-  }
+  // La renovación del cardumen tarda exactamente 3 días de juego (gestionada en tickSimulation)
   const desiredVisualFish = Math.min(8, Math.ceil(state.riverFishStock / 2));
   if (fishCount < desiredVisualFish && state.riverFishStock > 0 && Math.random() < 0.03 * state.speed) {
     createAnimal(state, 'fish');
   }
 
-  const bridgeX = state.bridge?.x ?? null;
+  const bridgeX = isBridgePassable(state) ? state.bridge!.x : null;
   for (const animal of state.animals) {
     if (animal.cooldown > 0) animal.cooldown = Math.max(0, animal.cooldown - dt);
     if (animal.type === 'cow') animal.milkReady = clamp(animal.milkReady + 0.06 * dt, 0, 100);
@@ -1161,8 +1272,12 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
   if (!state.pendingPetition) {
     state.petitionTimerSec = Math.max(0, state.petitionTimerSec - elapsedSeconds);
     if (state.petitionTimerSec <= 0) {
-      createVillagePetition(state);
-      return;
+      const petition = createVillagePetition(state);
+      if (petition && state.qwenAutoRespondPetitions) {
+        resolvePetitionWithQwen(state);
+      } else {
+        return;
+      }
     }
   }
 
@@ -1191,7 +1306,16 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
         : DAY_START_MINUTE
       : NIGHT_START_MINUTE;
     const secToBoundary = (nextBoundary - state.minute) / rate;
+    const prevMinute = state.minute;
     if (remainingRealSec >= secToBoundary - 1e-9) {
+      const gameMinutesPassed = Math.max(0, nextBoundary - prevMinute);
+      if (state.riverFishRestTimer > 0) {
+        state.riverFishRestTimer = Math.max(0, state.riverFishRestTimer - gameMinutesPassed / 1440);
+        if (state.riverFishRestTimer <= 0) {
+          state.riverFishStock = state.riverFishMaxStock;
+          addLog(state, `El río reposó ${RIVER_FISH_RESTOCK_DAYS} días y renovó su cardumen de peces.`, 'sky');
+        }
+      }
       state.minute = nextBoundary;
       remainingRealSec = Math.max(0, remainingRealSec - secToBoundary);
       if (state.minute >= 1440) {
@@ -1254,7 +1378,15 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
         }
       }
     } else {
-      state.minute += rate * remainingRealSec;
+      const gameMinutesPassed = Math.max(0, rate * remainingRealSec);
+      if (state.riverFishRestTimer > 0) {
+        state.riverFishRestTimer = Math.max(0, state.riverFishRestTimer - gameMinutesPassed / 1440);
+        if (state.riverFishRestTimer <= 0) {
+          state.riverFishStock = state.riverFishMaxStock;
+          addLog(state, `El río reposó ${RIVER_FISH_RESTOCK_DAYS} días y renovó su cardumen de peces.`, 'sky');
+        }
+      }
+      state.minute += gameMinutesPassed;
       remainingRealSec = 0;
     }
   }
@@ -1330,7 +1462,7 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
   const hasSheepWool = state.animals.some((a) => a.type === 'sheep');
 
   const deadIds: number[] = [];
-  const currentBridgeX = state.bridge?.x ?? null;
+  const currentBridgeX = isBridgePassable(state) ? state.bridge!.x : null;
 
   for (const agent of state.agents) {
     const onLitRoad = isNearRoad(state.roads, agent.x, agent.y);
@@ -1400,6 +1532,9 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
 
     if (agent.health <= 0) {
       deadIds.push(agent.id);
+      if (agent.activeConstruction) {
+        cancelActiveConstruction(state, agent, 'fallecimiento', true);
+      }
       transferInheritance(state, agent);
       addLog(state, `${agent.name} (${agent.ageYears} años) no resistió y falleció.`, 'rose');
       continue;
@@ -1559,12 +1694,18 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
         }
         const dist = moveTowards(agent, b.x, b.y + 12, moveSpeed, dt, currentBridgeX);
         if (dist <= 26 && agent.taskTimer <= 5) {
+          const eff = b.efficiencyMultiplier ?? 1;
+          if (!b.isOperational || eff <= 0) {
+            agent.thought = `${b.name} está inoperativo por deuda de mantenimiento o deterioro.`;
+            agent.taskTimer = 0;
+            break;
+          }
           if ((b.type === 'forge' || b.type === 'bakery') && (agent.energy < 35 || agent.education < 28) && state.fires.length < 3 && Math.random() < 0.025) {
             spawnFire(state, b.x, b.y, `Error accidental de ${agent.name} en ${b.name}`, 'special', b.id);
           }
           advanceJobMastery(agent, agent.job, 2);
           const competitors = getCompetingBuildingCount(state, b.type);
-          const competitionFactor = 1 / (1 + 0.35 * (competitors - 1));
+          const competitionFactor = (1 / (1 + 0.35 * (competitors - 1))) * eff;
           if (b.type === 'bank') {
             if (agent.inv.gold > 0) {
               b.storage.gold += agent.inv.gold;
@@ -1574,9 +1715,9 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
               b.storage.silver += agent.inv.silver;
               agent.inv.silver = 0;
             }
-            const earned = mintBackedCoins(state, Math.max(1, Math.round(5 * competitionFactor)));
+            const earned = mintBackedCoins(state, Math.max(0, Math.round(5 * competitionFactor)));
             agent.coins += earned;
-            b.storage.coins += mintBackedCoins(state, 3);
+            b.storage.coins += mintBackedCoins(state, Math.round(3 * eff));
             if (state.loans.length < 3 && Math.random() < 0.25) {
               const needyBuilder = state.agents.find(
                 (x) => !x.isChild && (x.job === 'Constructor' || x.job === 'Carpintero') && x.coins < 20
@@ -1584,11 +1725,11 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
               if (needyBuilder) grantBankLoan(state, needyBuilder, 12, 'obras civiles');
             }
           } else {
-            const reward = Math.max(1, Math.round(4 * competitionFactor));
+            const reward = Math.max(0, Math.round(4 * competitionFactor));
             agent.coins += mintBackedCoins(state, reward);
-            state.knowledge += b.type === 'school' ? 2 : 1;
+            state.knowledge += (b.type === 'school' ? 2 : 1) * eff;
             if (b.type === 'school') {
-              agent.education = clamp(agent.education + 2, 0, 100);
+              agent.education = clamp(agent.education + 2 * eff, 0, 100);
               syncAgentSkills(agent);
             }
             if (b.type === 'general_depot') {
@@ -1627,8 +1768,12 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
           }
           state.riverFishStock = Math.max(0, state.riverFishStock - 1);
           if (state.riverFishStock === 0) {
-            state.riverFishRestTimer = 55;
-            addLog(state, 'Pesca sobreexplotada: el río entró en reposo para renovar peces.', 'amber');
+            state.riverFishRestTimer = RIVER_FISH_RESTOCK_DAYS;
+            addLog(
+              state,
+              `Pesca sobreexplotada: el río entró en reposo de ${RIVER_FISH_RESTOCK_DAYS} días para renovar peces.`,
+              'amber'
+            );
           }
           agent.inv.food += myDock ? 2 : 1;
           const dockBonus = myDock ? Math.max(2, Math.round(4 / getCompetingBuildingCount(state, 'dock'))) : 1;
@@ -1728,7 +1873,7 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
           if (target.amount <= 0) {
             // Recurso finito sobreexplotado: entra en reposo para renovarse luego
             target.depleted = true;
-            target.restTimer = 45;
+            target.restTimer = 28;
           }
           agent.taskTimer = Math.min(agent.taskTimer, 6);
         }
@@ -1757,171 +1902,31 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
         }
         break;
       }
-      case 'build_house': {
-        if (!shouldBuildHouse(state)) {
-          agent.taskTimer = 0;
-          break;
-        }
-        const targetHubX = state.plaza ? state.plaza.x : agent.x;
-        const targetHubY = state.plaza ? state.plaza.y : agent.y;
-        const dist = moveTowards(agent, targetHubX, targetHubY, moveSpeed, dt, currentBridgeX);
-        if (dist <= 160 && agent.taskTimer <= 4) {
-          const woodNeed = carpentry ? 3 : 4;
-          if (consumeConstructionResources(state, agent, { wood: woodNeed })) {
-            const zone: 'south' | 'north' =
-              state.bridge !== null &&
-              state.houses.length >= 4 &&
-              state.houses.filter((h) => h.zone === 'north').length < 4
-                ? 'north'
-                : 'south';
-            const h = createHouseNearCenter(
-              state,
-              agent.name,
-              zone,
-              undefined,
-              agent.x,
-              agent.y,
-              agent.constructionKnowledge
-            );
-            state.knowledge += 8;
-            agent.constructionKnowledge = clamp(agent.constructionKnowledge + 6, 0, 100);
-            advanceJobMastery(agent, 'Constructor', 5);
-            agent.coins += mintBackedCoins(state, 6);
-            addLog(
-              state,
-              `Qwen 2.5 eligió (${h.x}, ${h.y}) y ${agent.name} construyó ${h.name} (cap. ${h.capacity}).`,
-              'emerald'
-            );
-          }
-          agent.taskTimer = 0;
-        }
-        break;
-      }
-      case 'build_plaza': {
-        if (state.plaza) {
-          agent.taskTimer = 0;
-          break;
-        }
-        if (agent.taskTimer <= 4) {
-          if (consumeConstructionResources(state, agent, { wood: 6, stone: 6 })) {
-            const plaza = createPlaza(state, agent.name, agent.x, agent.y);
-            state.knowledge += 14;
-            agent.constructionKnowledge = clamp(agent.constructionKnowledge + 8, 0, 100);
-            advanceJobMastery(agent, 'Constructor', 6);
-            agent.coins += mintBackedCoins(state, 10);
-            addLog(
-              state,
-              `Qwen 2.5 ubicó la Plaza Central en (${plaza.x}, ${plaza.y}) y ${agent.name} la construyó.`,
-              'sky'
-            );
-          }
-          agent.taskTimer = 0;
-        }
-        break;
-      }
-      case 'build_bridge': {
-        if (state.bridge) {
-          agent.taskTimer = 0;
-          break;
-        }
-        const dist = moveTowards(agent, agent.x, RIVER_BOTTOM_Y + 14, moveSpeed, dt, currentBridgeX);
-        if (dist <= 40 && agent.taskTimer <= 4) {
-          if (consumeConstructionResources(state, agent, { wood: 6, stone: 4 })) {
-            const bridge = createBridge(state, agent.name, agent.x);
-            state.knowledge += 14;
-            agent.constructionKnowledge = clamp(agent.constructionKnowledge + 8, 0, 100);
-            advanceJobMastery(agent, 'Constructor', 6);
-            agent.coins += mintBackedCoins(state, 10);
-            addLog(
-              state,
-              `Qwen 2.5 decidió cruzar el río en X=${bridge.x} y ${agent.name} construyó el Puente.`,
-              'sky'
-            );
-          }
-          agent.taskTimer = 0;
-        }
-        break;
-      }
-      case 'plant_farm': {
-        if (agent.taskTimer <= 4) {
-          if (consumeConstructionResources(state, agent, { wood: 3 })) {
-            const farm = createFarmPlot(state, 'south', agent.x, agent.y);
-            state.knowledge += 4;
-            addLog(
-              state,
-              `Qwen 2.5 ubicó parcela de ${farm.cropName} en (${farm.x}, ${farm.y}) sembrada por ${agent.name}.`,
-              'emerald'
-            );
-          }
-          agent.taskTimer = 0;
-        }
-        break;
-      }
+      case 'build_house':
+      case 'upgrade_house':
+      case 'build_plaza':
+      case 'build_bridge':
+      case 'plant_farm':
       case 'build_special': {
-        const targetHubX = state.plaza ? state.plaza.x : agent.x;
-        const targetHubY = state.plaza ? state.plaza.y : agent.y;
-        const dist = moveTowards(agent, targetHubX, targetHubY, moveSpeed, dt, currentBridgeX);
-        if (dist <= 160 && agent.taskTimer <= 4) {
-          const order: SpecialBuilding['type'][] = [
-            'dock',
-            'general_depot',
-            'market',
-            'bank',
-            'school',
-            'infirmary',
-            'bakery',
-            'carpentry',
-            'forge',
-            'apothecary',
-            'town_hall',
-            'police_station',
-            'prison',
-          ];
-          const missing = order.find(
-            (t) =>
-              !state.specialBuildings.some((b) => b.type === t) &&
-              hasAvailableOperatorForBuilding(state, t)
-          );
-          if (missing && consumeConstructionResources(state, agent, { wood: 5, stone: 3 })) {
-            const b = createSpecialBuilding(
-              state,
-              missing,
-              agent.name,
-              agent.x,
-              agent.y,
-              agent.constructionKnowledge
-            );
-            if (b) {
-              state.knowledge += 16;
-              agent.constructionKnowledge = clamp(agent.constructionKnowledge + 8, 0, 100);
-              advanceJobMastery(agent, 'Constructor', 6);
-              agent.coins += mintBackedCoins(state, 10);
-              addLog(state, `Qwen 2.5 eligió (${b.x}, ${b.y}) y ${agent.name} inauguró ${b.name}.`, 'sky');
-            }
+        if (agent.job !== 'Constructor') {
+          if (agent.activeConstruction) {
+            cancelActiveConstruction(state, agent, `oficio ${agent.job} no constructor`);
           }
-          agent.taskTimer = 0;
-        }
-        break;
-      }
-      case 'upgrade_house': {
-        const house = state.houses.find((h) => h.level < ERA_METADATA[state.era].maxHouseLevel) ?? state.houses[0];
-        if (!house) {
           agent.taskTimer = 0;
           break;
         }
-        const dist = moveTowards(agent, house.x, house.y, moveSpeed, dt, currentBridgeX);
-        if (dist <= 22 && agent.taskTimer <= 4) {
-          if (consumeConstructionResources(state, agent, { wood: 3, stone: 2 })) {
-            const upgraded = upgradeLowestHouse(state, agent.constructionKnowledge);
-            if (upgraded) {
-              state.knowledge += 10;
-              agent.constructionKnowledge = clamp(agent.constructionKnowledge + 6, 0, 100);
-              advanceJobMastery(agent, 'Constructor', 4);
-              agent.coins += mintBackedCoins(state, 8);
-              addLog(state, `${agent.name} mejoró ${upgraded.name} a Nivel ${upgraded.level}.`, 'sky');
-            }
-          }
+        const ac = agent.activeConstruction;
+        if (!ac) {
           agent.taskTimer = 0;
+          break;
+        }
+        const dist = moveTowards(agent, ac.x, ac.y, moveSpeed, dt, currentBridgeX);
+        if (dist <= 44) {
+          ac.elapsed = clamp(ac.elapsed + dt * workMult, 0, ac.totalDuration);
+          if (ac.elapsed >= ac.totalDuration) {
+            completeActiveConstruction(state, agent);
+            agent.taskTimer = 0;
+          }
         }
         break;
       }
@@ -1937,11 +1942,27 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
             patient.happiness = clamp(patient.happiness + 6, 0, 100);
             patient.health = clamp(patient.health + 4, 1, 100);
           } else {
-            patient.isSick = false;
-            patient.illness = null;
-            patient.illnessName = null;
-            patient.health = clamp(patient.health + (hasInfirmary ? 42 : apothecary ? 34 : 28), 0, 100);
-            patient.happiness = clamp(patient.happiness + 10, 0, 100);
+            const inf = state.specialBuildings.find((b) => b.type === 'infirmary' && b.isOperational);
+            let usedMedicine = false;
+            if (agent.medicineCount > 0) {
+              agent.medicineCount -= 1;
+              usedMedicine = true;
+            } else if (inf && inf.storage.medicine > 0) {
+              inf.storage.medicine -= 1;
+              usedMedicine = true;
+            }
+            const seriousDisease = (patient.illness?.dangerPct ?? 0) >= 40;
+            if (usedMedicine || !seriousDisease) {
+              patient.isSick = false;
+              patient.illness = null;
+              patient.illnessName = null;
+              patient.health = clamp(patient.health + (usedMedicine ? 48 : 28), 0, 100);
+              patient.happiness = clamp(patient.happiness + 10, 0, 100);
+            } else {
+              // Sin medicina en cuadro serio: alivio parcial sin cura mágica
+              patient.health = clamp(patient.health + 12, 0, 100);
+              patient.thought = 'Necesito medicina de la Botica para curarme completamente.';
+            }
           }
           agent.coins += mintBackedCoins(state, 5);
           advanceJobMastery(agent, 'Curandero', 4);
@@ -1959,9 +1980,10 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
         const dist = moveTowards(agent, tx, ty, moveSpeed * 0.85, dt, currentBridgeX);
         if (dist <= 75) {
           const mentorBoost = mentor ? 1.5 : 1;
-          state.knowledge += (hasSchool ? 0.18 : 0.08) * dt * mentorBoost;
-          agent.education = clamp(agent.education + (hasSchool ? 0.25 : 0.09) * dt * mentorBoost, 0, 100);
-          agent.constructionKnowledge = clamp(agent.constructionKnowledge + (hasSchool ? 0.12 : 0.04) * dt * mentorBoost, 0, 100);
+          const schoolEff = school ? school.efficiencyMultiplier ?? 1 : 1;
+          state.knowledge += (hasSchool ? 0.18 * schoolEff : 0.08) * dt * mentorBoost;
+          agent.education = clamp(agent.education + (hasSchool ? 0.25 * schoolEff : 0.09) * dt * mentorBoost, 0, 100);
+          agent.constructionKnowledge = clamp(agent.constructionKnowledge + (hasSchool ? 0.12 * schoolEff : 0.04) * dt * mentorBoost, 0, 100);
           if (mentor && mentor.job === 'Carpintero') {
             agent.carpentryKnowledge = clamp(agent.carpentryKnowledge + 0.16 * dt, 0, 100);
           }
@@ -1983,7 +2005,7 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
             agent.coins += gained;
             if (coinNode.amount <= 0) {
               coinNode.depleted = true;
-              coinNode.restTimer = 45;
+              coinNode.restTimer = 28;
             }
             agent.taskTimer = 0;
           }
@@ -2008,36 +2030,98 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
         const ty = preferredShop ? preferredShop.y : state.plaza ? state.plaza.y : agent.y;
         const dist = moveTowards(agent, tx, ty, moveSpeed * 0.9, dt, currentBridgeX);
         if (dist <= 32 && agent.taskTimer <= 6) {
+          const eff = preferredShop ? preferredShop.efficiencyMultiplier ?? 1 : 1;
           const competitors = preferredShop ? getCompetingBuildingCount(state, preferredShop.type) : 1;
-          const compMult = 1 / (1 + 0.35 * (competitors - 1));
+          const compMult = (1 / (1 + 0.35 * (competitors - 1))) * eff;
+
           if (agent.job === 'Panadero' && bakery) {
             if (isLawActive(state, 'ban_trade_bread')) {
               enforceLawViolation(state, agent, 'ban_trade_bread');
-            } else if (agent.inv.food > 0) {
-              agent.inv.food -= 1;
-              agent.breadCount += 2;
-              agent.coins += mintBackedCoins(state, Math.max(1, Math.round(5 * compMult)));
-            } else {
-              agent.breadCount += 1;
-              agent.coins += mintBackedCoins(state, Math.max(1, Math.round(3 * compMult)));
+            } else if ((bakery.efficiencyMultiplier ?? 1) > 0) {
+              // Sección 6.B: Panadería necesita alimento real para producir pan
+              const hasFood = agent.inv.food > 0 || bakery.storage.food > 0 || (depot?.storage.food ?? 0) > 0;
+              if (hasFood) {
+                let src = '';
+                if (agent.inv.food > 0) {
+                  agent.inv.food -= 1;
+                  src = `Inventario (${agent.name})`;
+                } else if (bakery.storage.food > 0) {
+                  bakery.storage.food -= 1;
+                  src = bakery.name;
+                } else if (depot) {
+                  depot.storage.food -= 1;
+                  src = depot.name;
+                }
+                agent.breadCount += 2;
+                agent.coins += mintBackedCoins(state, Math.max(1, Math.round(5 * compMult)));
+                recordResourceOperation(state, {
+                  actorName: agent.name,
+                  targetName: bakery.name,
+                  operationType: 'produccion',
+                  materials: { food: 1 },
+                  source: src,
+                  result: '+2 Panes horneados',
+                });
+              } else {
+                agent.thought = 'La Panadería necesita 1 Alimento para hornear pan.';
+              }
             }
           } else if ((agent.job === 'Herrero' || agent.job === 'Artesano') && forge) {
-            if (agent.inv.iron > 0 || agent.inv.copper > 0) {
-              if (agent.inv.iron > 0) agent.inv.iron -= 1;
-              else agent.inv.copper -= 1;
-              agent.toolsCount += 1;
-              agent.coins += mintBackedCoins(state, Math.max(2, Math.round(9 * compMult)));
-              addLog(state, `${agent.name} forjó herramientas en la Herrería.`, 'amber');
-            } else {
-              agent.coins += mintBackedCoins(state, Math.max(1, Math.round(4 * compMult)));
+            if ((forge.efficiencyMultiplier ?? 1) > 0) {
+              // Sección 6.B: Herrería requiere 1 Cobre + 1 Hierro reales
+              const hasCopper = agent.inv.copper > 0 || forge.storage.copper > 0 || (depot?.storage.copper ?? 0) > 0;
+              const hasIron = agent.inv.iron > 0 || forge.storage.iron > 0 || (depot?.storage.iron ?? 0) > 0;
+              if (hasCopper && hasIron) {
+                if (agent.inv.copper > 0) agent.inv.copper -= 1;
+                else if (forge.storage.copper > 0) forge.storage.copper -= 1;
+                else if (depot) depot.storage.copper -= 1;
+
+                if (agent.inv.iron > 0) agent.inv.iron -= 1;
+                else if (forge.storage.iron > 0) forge.storage.iron -= 1;
+                else if (depot) depot.storage.iron -= 1;
+
+                agent.toolsCount += 1;
+                agent.coins += mintBackedCoins(state, Math.max(2, Math.round(9 * compMult)));
+                recordResourceOperation(state, {
+                  actorName: agent.name,
+                  targetName: forge.name,
+                  operationType: 'produccion',
+                  materials: { copper: 1, iron: 1 },
+                  source: 'Forja / Depósito',
+                  result: '+1 Herramienta forjada',
+                });
+                addLog(state, `${agent.name} forjó herramientas (1 Cobre + 1 Hierro) en la Herrería.`, 'amber');
+              } else {
+                agent.thought = 'La Herrería necesita 1 Cobre y 1 Hierro para forjar herramientas.';
+              }
             }
           } else if (agent.job === 'Boticario' && apothecary) {
-            if (agent.inv.food > 0) {
-              agent.inv.food -= 1;
-              agent.medicineCount += 1;
-              agent.coins += mintBackedCoins(state, Math.max(2, Math.round(6 * compMult)));
-            } else {
-              agent.coins += mintBackedCoins(state, Math.max(1, Math.round(3 * compMult)));
+            if ((apothecary.efficiencyMultiplier ?? 1) > 0) {
+              // Sección 6.B: Botica requiere 1 Alimento + 1 Madera para preparar medicina
+              const hasFood = agent.inv.food > 0 || apothecary.storage.food > 0 || (depot?.storage.food ?? 0) > 0;
+              const hasWood = agent.inv.wood > 0 || apothecary.storage.wood > 0 || (depot?.storage.wood ?? 0) > 0;
+              if (hasFood && hasWood) {
+                if (agent.inv.food > 0) agent.inv.food -= 1;
+                else if (apothecary.storage.food > 0) apothecary.storage.food -= 1;
+                else if (depot) depot.storage.food -= 1;
+
+                if (agent.inv.wood > 0) agent.inv.wood -= 1;
+                else if (apothecary.storage.wood > 0) apothecary.storage.wood -= 1;
+                else if (depot) depot.storage.wood -= 1;
+
+                agent.medicineCount += 1;
+                agent.coins += mintBackedCoins(state, Math.max(2, Math.round(6 * compMult)));
+                recordResourceOperation(state, {
+                  actorName: agent.name,
+                  targetName: apothecary.name,
+                  operationType: 'produccion',
+                  materials: { food: 1, wood: 1 },
+                  source: 'Botica / Depósito',
+                  result: '+1 Medicina elaborada',
+                });
+              } else {
+                agent.thought = 'La Botica necesita 1 Alimento y 1 Madera para elaborar medicina.';
+              }
             }
           } else if (agent.job === 'Carpintero') {
             if (isLawActive(state, 'ban_trade_wood')) {
@@ -2080,8 +2164,8 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
           } else if (agent.coins >= 4 && agent.inv.food === 0) {
             agent.coins -= 4;
             agent.inv.food += 1;
-          } else if (preferredShop) {
-            agent.coins += mintBackedCoins(state, 2);
+          } else if (preferredShop && eff > 0) {
+            agent.coins += mintBackedCoins(state, Math.max(1, Math.round(2 * eff)));
           }
           advanceJobMastery(agent, agent.job, 2);
           agent.taskTimer = 0;
@@ -2345,6 +2429,7 @@ function drawCenterRiver(
   ctx.fillText('ZONA SUR', WORLD_CENTER_X, RIVER_BOTTOM_Y + 21);
 
   if (bridge) {
+    const passable = isBridgePassable({ bridge });
     const bxMin = bridge.x - BRIDGE_HALF_WIDTH;
     const bridgeW = BRIDGE_HALF_WIDTH * 2;
     ctx.fillStyle = 'rgba(0,0,0,0.32)';
@@ -2352,15 +2437,23 @@ function drawCenterRiver(
     ctx.fillStyle = '#475569';
     ctx.fillRect(bxMin - 3, RIVER_TOP_Y - 8, 6, RIVER_BOTTOM_Y - RIVER_TOP_Y + 16);
     ctx.fillRect(bxMin + bridgeW - 3, RIVER_TOP_Y - 8, 6, RIVER_BOTTOM_Y - RIVER_TOP_Y + 16);
-    ctx.fillStyle = '#78350f';
+    ctx.fillStyle = passable ? '#78350f' : '#450a0a';
     ctx.fillRect(bxMin, RIVER_TOP_Y - 6, bridgeW, RIVER_BOTTOM_Y - RIVER_TOP_Y + 12);
-    ctx.fillStyle = '#92400e';
+    ctx.fillStyle = passable ? '#92400e' : '#7f1d1d';
     for (let by = RIVER_TOP_Y - 4; by <= RIVER_BOTTOM_Y + 2; by += 6) {
       ctx.fillRect(bxMin + 3, by, bridgeW - 6, 4);
     }
     ctx.fillStyle = '#451a03';
     ctx.fillRect(bxMin, RIVER_TOP_Y - 6, 4, RIVER_BOTTOM_Y - RIVER_TOP_Y + 12);
     ctx.fillRect(bxMin + bridgeW - 4, RIVER_TOP_Y - 6, 4, RIVER_BOTTOM_Y - RIVER_TOP_Y + 12);
+    if (!passable || bridge.maintenanceStatus !== 'ok') {
+      ctx.fillStyle = !passable ? 'rgba(153, 27, 27, 0.92)' : 'rgba(180, 83, 9, 0.92)';
+      ctx.fillRect(bridge.x - 28, RIVER_TOP_Y + 22, 56, 11);
+      ctx.fillStyle = '#fef2f2';
+      ctx.font = 'bold 7px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(!passable ? 'BLOQUEADO' : 'DEUDA MANT.', bridge.x, RIVER_TOP_Y + 30);
+    }
     if (isBridgeSelected) {
       ctx.strokeStyle = '#facc15';
       ctx.lineWidth = 2;
@@ -2372,19 +2465,40 @@ function drawCenterRiver(
 function drawRoads(ctx: CanvasRenderingContext2D, roads: RoadTile[]): void {
   const half = ROAD_GRID_SIZE / 2;
   for (const r of roads) {
-    ctx.fillStyle = '#475569';
-    ctx.fillRect(r.x - half, r.y - half, ROAD_GRID_SIZE, ROAD_GRID_SIZE);
-    ctx.fillStyle = '#64748b';
-    ctx.fillRect(r.x - half + 2, r.y - half + 2, ROAD_GRID_SIZE - 4, ROAD_GRID_SIZE - 4);
-    ctx.fillStyle = '#94a3b8';
-    ctx.fillRect(r.x - 8, r.y - 7, 6, 5);
-    ctx.fillRect(r.x + 2, r.y - 5, 6, 5);
-    ctx.fillRect(r.x - 6, r.y + 2, 7, 5);
-    ctx.fillRect(r.x + 3, r.y + 3, 5, 4);
-    if (r.lit && (r.x + r.y) % 48 === 0) {
+    const rType = r.roadType ?? 'dirt';
+    if (rType === 'dirt') {
+      ctx.fillStyle = '#6b4724';
+      ctx.fillRect(r.x - half, r.y - half, ROAD_GRID_SIZE, ROAD_GRID_SIZE);
+      ctx.fillStyle = '#8b5e34';
+      ctx.fillRect(r.x - half + 2, r.y - half + 2, ROAD_GRID_SIZE - 4, ROAD_GRID_SIZE - 4);
+      ctx.fillStyle = '#a47549';
+      ctx.fillRect(r.x - 6, r.y - 5, 4, 3);
+      ctx.fillRect(r.x + 2, r.y + 2, 5, 3);
+    } else if (rType === 'reinforced') {
+      ctx.fillStyle = '#78350f';
+      ctx.fillRect(r.x - half, r.y - half, ROAD_GRID_SIZE, ROAD_GRID_SIZE);
+      ctx.fillStyle = '#475569';
+      ctx.fillRect(r.x - half + 3, r.y - half + 3, ROAD_GRID_SIZE - 6, ROAD_GRID_SIZE - 6);
+      ctx.fillStyle = '#cbd5e1';
+      ctx.fillRect(r.x - 6, r.y - 6, 5, 5);
+      ctx.fillRect(r.x + 1, r.y - 6, 5, 5);
+      ctx.fillRect(r.x - 6, r.y + 1, 5, 5);
+      ctx.fillRect(r.x + 1, r.y + 1, 5, 5);
+    } else {
+      ctx.fillStyle = '#475569';
+      ctx.fillRect(r.x - half, r.y - half, ROAD_GRID_SIZE, ROAD_GRID_SIZE);
+      ctx.fillStyle = '#64748b';
+      ctx.fillRect(r.x - half + 2, r.y - half + 2, ROAD_GRID_SIZE - 4, ROAD_GRID_SIZE - 4);
+      ctx.fillStyle = '#94a3b8';
+      ctx.fillRect(r.x - 8, r.y - 7, 6, 5);
+      ctx.fillRect(r.x + 2, r.y - 5, 6, 5);
+      ctx.fillRect(r.x - 6, r.y + 2, 7, 5);
+      ctx.fillRect(r.x + 3, r.y + 3, 5, 4);
+    }
+    if (r.hasLamp ?? (r.lit && (r.x + r.y) % 48 === 0)) {
       ctx.fillStyle = '#1e293b';
       ctx.fillRect(r.x + 7, r.y - 10, 3, 8);
-      ctx.fillStyle = '#f59e0b';
+      ctx.fillStyle = r.lit ? '#facc15' : '#64748b';
       ctx.fillRect(r.x + 6, r.y - 12, 5, 3);
     }
   }
@@ -2856,10 +2970,19 @@ function drawPixelHouse(
   const sizeTag = house.size === 'large' ? 'G' : house.size === 'medium' ? 'M' : 'C';
   ctx.fillStyle = 'rgba(15, 23, 42, 0.8)';
   ctx.fillRect(-13, -h / 2 - 25, 26, 9);
-  ctx.fillStyle = '#f8fafc';
+  ctx.fillStyle =
+    house.maintenanceStatus && house.maintenanceStatus !== 'ok' ? '#fbbf24' : '#f8fafc';
   ctx.font = 'bold 7px monospace';
   ctx.textAlign = 'center';
   ctx.fillText(`N${house.level}·${sizeTag}`, 0, -h / 2 - 18);
+
+  if (house.maintenanceStatus && house.maintenanceStatus !== 'ok') {
+    ctx.fillStyle = house.maintenanceStatus === 'ruined' ? 'rgba(127, 29, 29, 0.9)' : 'rgba(146, 64, 14, 0.9)';
+    ctx.fillRect(-16, h / 2 + 9, 32, 8);
+    ctx.fillStyle = '#fef3c7';
+    ctx.font = 'bold 6px monospace';
+    ctx.fillText(house.maintenanceStatus === 'ruined' ? 'RUINA' : 'DEUDA', 0, h / 2 + 15);
+  }
 
   ctx.restore();
 }
@@ -3365,6 +3488,19 @@ export function renderWorld(
   const selAgentId =
     state.selectedEntity?.kind === 'agent' ? state.selectedEntity.id : state.selectedAgentId;
   for (const agent of sortedAgents) {
+    if (agent.activeConstruction) {
+      const ac = agent.activeConstruction;
+      const pct = clamp(ac.elapsed / Math.max(1, ac.totalDuration), 0, 1);
+      ctx.fillStyle = 'rgba(245, 158, 11, 0.18)';
+      ctx.fillRect(ac.x - 18, ac.y - 14, 36, 28);
+      ctx.strokeStyle = '#f59e0b';
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(ac.x - 18, ac.y - 14, 36, 28);
+      ctx.fillStyle = '#0f172a';
+      ctx.fillRect(ac.x - 16, ac.y - 22, 32, 5);
+      ctx.fillStyle = '#10b981';
+      ctx.fillRect(ac.x - 15, ac.y - 21, Math.round(30 * pct), 3);
+    }
     drawPixelAgent(ctx, agent, selAgentId);
   }
 

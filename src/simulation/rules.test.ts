@@ -9,14 +9,17 @@ import {
   applyBuildingWear,
   applyQwenActions,
   assignMentorships,
+  BRIDGE_COSTS,
   buildBaseRoads,
   canAgentRest,
   canAgentsReproduce,
+  cancelActiveConstruction,
   canCarpenterUseWood,
   canGatherOrTradeMineral,
   CANVAS_HEIGHT,
   CANVAS_WIDTH,
   collectTaxesAndRepayLoans,
+  completeActiveConstruction,
   computeEra,
   computeSeason,
   computeUnlockedSkills,
@@ -55,7 +58,11 @@ import {
   getEmotionWorkMultiplier,
   getHappinessLabel,
   getHealthStatusLabel,
+  getHouseBuildCost,
+  getHouseUpgradeCost,
   getJobMasteryTierLabel,
+  getRoadTileCost,
+  getSpecialBuildingCost,
   getTerrainZoneAt,
   GOLD_COIN_BACKING,
   grantBankLoan,
@@ -63,6 +70,7 @@ import {
   HOUSE_SIZE_CAPACITIES,
   infectAgent,
   interpretQwenDirective,
+  isBridgePassable,
   isBuildingOperational,
   isNearRoad,
   isNightMinute,
@@ -82,20 +90,27 @@ import {
   NORTH_CENTER_Y,
   PETITION_INTERVAL_SECONDS,
   pickQwenBabyName,
+  PLAZA_COSTS,
   PREGNANCY_DAYS,
   progressDiseasesDaily,
   rebalanceBuildingOwnership,
   rebalanceFamilyHousing,
   repairDamagedStructures,
   resolvePetition,
+  resolvePetitionWithQwen,
   RIVER_BOTTOM_Y,
+  RIVER_FISH_RESTOCK_DAYS,
   RIVER_TOP_Y,
   runCouncilOfElders,
+  runThirtyDayMaintenance,
+  setAgentJob,
   shouldBuildHouse,
   SILVER_COIN_BACKING,
   SOUTH_CENTER_Y,
   spawnFire,
+  SPECIAL_BUILDING_COSTS,
   SPEED_TIMINGS,
+  startConstructionProject,
   switchPartnerForAgent,
   syncSpecialBuildingStaff,
   tameWildAnimal,
@@ -103,6 +118,7 @@ import {
   toggleVillageLaw,
   transferBuildingOwnership,
   triggerLightningStorm,
+  validateAndComputeConstructionPlan,
   VILLAGE_SKILLS,
   WORLD_CENTER_Y,
 } from './rules';
@@ -348,9 +364,13 @@ test('La actividad actual es concisa y estable entre ticks consecutivos', () => 
 
 test('Qwen 2.5 decide obras, exige operarios disponibles y construye casas solo si hacen falta', () => {
   const state = createInitialState();
-  state.agents[0].inv.wood += 60;
-  state.agents[0].inv.stone += 60;
-  state.agents[0].inv.iron += 12;
+  state.agents[0].job = 'Constructor';
+  state.agents[0].inv.wood += 140;
+  state.agents[0].inv.pineWood += 30;
+  state.agents[0].inv.oakWood += 25;
+  state.agents[0].inv.stone += 90;
+  state.agents[0].inv.iron += 25;
+  state.agents[0].inv.copper += 15;
 
   assert.equal(shouldBuildHouse(state), true); // Hay 10 sin casa
 
@@ -377,14 +397,16 @@ test('Qwen 2.5 decide obras, exige operarios disponibles y construye casas solo 
     'Genera una economía, construir comercios, caminos y permite más aldeanos',
     state.agents.map((a) => a.name)
   );
+  const mintedBeforeEcon = state.economyReserve.mintedCoins;
   applyQwenActions(state, econ.actions, spawnSettlers);
   assert.equal(state.policies.economyFocus, true);
+  assert.equal(state.economyReserve.mintedCoins, mintedBeforeEcon); // Nunca emite monedas gratis al generar economía
   assert.ok(state.specialBuildings.some((b) => b.type === 'bank'));
   assert.ok(state.specialBuildings.some((b) => b.type === 'market'));
   assert.ok(state.specialBuildings.some((b) => b.type === 'general_depot'));
   assert.ok(state.roads.length > 8);
 
-  // Verificar compuerta estricta de operario: bloquear todos los adultos como Alcalde ocupados y pedir otro edificio
+  // Verificar compuerta estricta de operario: bloquear todos los adultos como Banquero ocupado y pedir otro edificio
   const tinyState = createInitialState();
   tinyState.agents = [tinyState.agents[0]];
   tinyState.agents[0].inv.wood = 20;
@@ -403,8 +425,11 @@ test('Qwen 2.5 decide obras, exige operarios disponibles y construye casas solo 
   assert.notEqual(computeEra(200, [createHouseNearCenter(state, 'X', 'south'), ...state.houses]), 'primitive');
 });
 
-test('Matar cultivos, puente sobre río, caminos y pausa total de recursos', () => {
+test('Matar cultivos, puente sobre río, caminos con costo real y pausa total de recursos', () => {
   const state = createInitialState();
+  state.agents[0].job = 'Constructor';
+  state.agents[0].inv.wood = 80;
+
   createFarmPlot(state, 'south');
   createFarmPlot(state, 'south');
   assert.equal(state.farms.length, 2);
@@ -581,8 +606,10 @@ test('Edificios especiales: depósito estricto, propietario exclusivo, competenc
   assert.equal(b1.ownerId, buyer.id);
 });
 
-test('Recursos finitos y cardumen se agotan y renuevan solo tras reposo', () => {
+test('Recursos finitos y cardumen del río tarda 3 días en renovar peces', () => {
+  assert.equal(RIVER_FISH_RESTOCK_DAYS, 3);
   const state = createInitialState();
+  state.petitionTimerSec = 99999; // Aíslar ciclo de 3 días de la pausa de petición
   state.resources = [
     {
       id: 999,
@@ -596,12 +623,19 @@ test('Recursos finitos y cardumen se agotan y renuevan solo tras reposo', () => 
     },
   ];
   state.riverFishStock = 0;
-  state.riverFishRestTimer = 1;
+  state.riverFishRestTimer = RIVER_FISH_RESTOCK_DAYS;
 
-  for (let i = 0; i < 6; i++) tickSimulation(state, 1);
+  // Avanzar 2 días completos de juego (a x1: 420s día + 180s noche = 600s/día -> 1200s = 2 días)
+  for (let i = 0; i < 120; i++) tickSimulation(state, 10);
   assert.equal(state.resources[0].depleted, false);
   assert.equal(state.resources[0].amount, state.resources[0].maxAmount);
-  assert.ok(state.riverFishStock > 0);
+  assert.equal(state.riverFishStock, 0);
+  assert.ok(state.riverFishRestTimer > 0.9 && state.riverFishRestTimer <= 1.05);
+
+  // Avanzar 1 día completo adicional (3 días en total) -> renueva cardumen completo
+  for (let i = 0; i < 65; i++) tickSimulation(state, 10);
+  assert.equal(state.riverFishStock, state.riverFishMaxStock);
+  assert.equal(state.riverFishRestTimer, 0);
 });
 
 test('Leyes, Comisaría + Cárcel y Peticiones del Representante cada 30 min ("Fue Escuchado" / "No fue Escuchado")', () => {
@@ -725,10 +759,17 @@ test('Economía respaldada en Oro y Plata, Crónica ilimitada en estado, Defensa
   const variants = FISH_VARIANTS.map((v) => createAnimal(state, 'fish', undefined, undefined, v).fishVariant);
   assert.deepEqual(variants, FISH_VARIANTS);
 
-  // Herramientas desde 36% saber
+  // Herramientas desde 36% saber: exige 1 cobre + 1 hierro (nunca madera sola)
   defender.education = 36;
+  defender.inv.wood = 5;
+  defender.inv.copper = 0;
+  defender.inv.iron = 0;
+  assert.equal(craftToolsForAgent(state, defender), false);
+  defender.inv.copper = 1;
   defender.inv.iron = 1;
   assert.equal(craftToolsForAgent(state, defender), true);
+  assert.equal(defender.inv.copper, 0);
+  assert.equal(defender.inv.iron, 0);
 
   // Eliminación desde inspector
   const house = createHouseNearCenter(state, 'Mateo', 'south');
@@ -762,3 +803,272 @@ test('Economía respaldada en Oro y Plata, Crónica ilimitada en estado, Defensa
   const mRes = modifyAgentResource(state, state.agents[0].id, 'copper', 2);
   assert.ok(mRes && mRes.includes('cobre'));
 });
+
+test('Costos exactos de viviendas N1-N4, Plaza, Puente (sin sustituir maderas), Caminos y 13 Edificios', () => {
+  assert.deepEqual(getHouseBuildCost('small'), { wood: 3 });
+  assert.deepEqual(getHouseBuildCost('medium'), { wood: 4 });
+  assert.deepEqual(getHouseBuildCost('large'), { wood: 6 });
+  assert.deepEqual(getHouseUpgradeCost('small', 2), { pineWood: 5, stone: 2 });
+  assert.deepEqual(getHouseUpgradeCost('medium', 3), { stone: 8, oakWood: 4 });
+  assert.deepEqual(getHouseUpgradeCost('large', 4), { stone: 14, iron: 9, oakWood: 7 });
+  assert.deepEqual(PLAZA_COSTS.build, { wood: 15, stone: 15, oakWood: 5, iron: 4 });
+  assert.deepEqual(BRIDGE_COSTS.build, { oakWood: 12, stone: 10, iron: 6, copper: 3 });
+  assert.deepEqual(getRoadTileCost('dirt', false), { wood: 1 });
+  assert.deepEqual(getRoadTileCost('stone', false), { stone: 3 });
+  assert.deepEqual(getRoadTileCost('reinforced', true), { stone: 2, wood: 3, copper: 1, iron: 1 });
+  assert.equal(Object.keys(SPECIAL_BUILDING_COSTS).length, 13);
+  assert.deepEqual(getSpecialBuildingCost('bank', 1), {
+    wood: 12,
+    stone: 12,
+    oakWood: 6,
+    iron: 6,
+    copper: 3,
+  });
+  assert.deepEqual(getSpecialBuildingCost('town_hall', 3), {
+    oakWood: 10,
+    stone: 10,
+    iron: 8,
+    copper: 5,
+    silver: 2,
+  });
+
+  // El Puente exige Roble explícitamente y NO acepta Madera común ni Pino como sustituto
+  const state = createInitialState();
+  const builder = state.agents[0];
+  builder.job = 'Constructor';
+  builder.inv.wood = 99;
+  builder.inv.pineWood = 99;
+  builder.inv.stone = 20;
+  builder.inv.iron = 10;
+  builder.inv.copper = 10;
+  builder.inv.oakWood = 0;
+
+  assert.equal(startConstructionProject(state, builder, 'bridge').ok, false);
+  assert.equal(state.bridge, null);
+
+  builder.inv.oakWood = 12;
+  const started = startConstructionProject(state, builder, 'bridge', { duration: 10 });
+  assert.equal(started.ok, true);
+  assert.equal(builder.inv.oakWood, 0);
+  assert.equal(completeActiveConstruction(state, builder), true);
+  assert.ok(state.bridge !== null);
+
+  // Caminos: nunca gratuitos (ni con farol)
+  const noWoodState = createInitialState();
+  noWoodState.agents[0].job = 'Constructor';
+  noWoodState.agents[0].inv.wood = 0;
+  assert.equal(addRoadTile(noWoodState, 500, 620, 'dirt', false), null);
+  noWoodState.agents[0].inv.wood = 3;
+  assert.equal(addRoadTile(noWoodState, 500, 620, 'dirt', true), null); // Falta 1 cobre + 1 hierro del farol
+  noWoodState.agents[0].inv.copper = 1;
+  noWoodState.agents[0].inv.iron = 1;
+  const litRoad = addRoadTile(noWoodState, 500, 620, 'dirt', true);
+  assert.ok(litRoad);
+  assert.equal(litRoad.hasLamp, true);
+  assert.equal(noWoodState.agents[0].inv.wood, 0);
+  assert.equal(noWoodState.agents[0].inv.copper, 0);
+  assert.equal(noWoodState.agents[0].inv.iron, 0);
+});
+
+test('Origen estricto (solo Constructor + Depósito General), descuento Carpintería con consumo real y cancelación proporcional', () => {
+  const state = createInitialState();
+  const builder = state.agents[0];
+  builder.job = 'Constructor';
+  const bystander = state.agents[1];
+  bystander.inv.wood = 50;
+  bystander.inv.stone = 50;
+  const someHouse = createHouseNearCenter(state, 'X', 'south', 'small');
+  someHouse.storage.wood = 50; // Bloqueado: no es Depósito General
+
+  builder.inv.wood = 2; // Insuficiente para casa chica sin descuento (3 wood)
+  assert.equal(startConstructionProject(state, builder, 'house', { houseSize: 'small' }).ok, false);
+  assert.equal(bystander.inv.wood, 50); // Nunca toma de otro aldeano
+
+  // Con Depósito General operativo, extrae lo faltante del depósito y registra 'extraccion_deposito'
+  const depot = createSpecialBuilding(state, 'general_depot', 'Mateo')!;
+  assert.ok(depot);
+  depot.storage.wood = 5;
+  const startFromDepot = startConstructionProject(state, builder, 'house', { houseSize: 'small', duration: 20 });
+  assert.equal(startFromDepot.ok, true);
+  assert.equal(builder.inv.wood, 0);
+  assert.equal(depot.storage.wood, 4);
+  assert.ok(state.resourceLedger.some((r) => r.operationType === 'extraccion_deposito'));
+
+  // Cancelación al cambiar de oficio a mitad de obra (50% progreso) reembolsa proporcionalmente y registra 'cancelacion'
+  assert.ok(builder.activeConstruction);
+  builder.activeConstruction!.elapsed = 10; // 50% de 20
+  setAgentJob(state, builder, 'Minero', 'prueba');
+  assert.equal(builder.activeConstruction, null);
+  assert.equal(builder.inv.wood, 1); // 2 - floor(2 * 0.5) = 1
+  assert.equal(depot.storage.wood, 5); // 4 + (1 - floor(1 * 0.5)) = 5
+  assert.ok(state.resourceLedger.some((r) => r.operationType === 'cancelacion'));
+
+  // Descuento de Carpintería (-1 madera en viviendas) SOLO aplica si está operativa Y consume 1 madera de su depósito
+  const sCarp = createInitialState();
+  const b2 = sCarp.agents[0];
+  b2.job = 'Constructor';
+  b2.inv.wood = 2;
+  const carp = createSpecialBuilding(sCarp, 'carpentry', 'Mateo')!;
+  assert.ok(carp);
+  carp.storage.wood = 0;
+  assert.equal(startConstructionProject(sCarp, b2, 'house', { houseSize: 'small' }).ok, false); // Sin madera en carpintería, no hay descuento
+  carp.storage.wood = 1;
+  const withDiscount = startConstructionProject(sCarp, b2, 'house', { houseSize: 'small' });
+  assert.equal(withDiscount.ok, true);
+  assert.equal(b2.inv.wood, 0);
+  assert.equal(carp.storage.wood, 0); // Consumió 1 madera del taller de Carpintería
+
+  // Cancelación en muerte / encarcelamiento
+  const sJail = createInitialState();
+  const jb = sJail.agents[0];
+  jb.job = 'Constructor';
+  jb.inv.wood = 3;
+  assert.equal(startConstructionProject(sJail, jb, 'house', { houseSize: 'small', duration: 10 }).ok, true);
+  createSpecialBuilding(sJail, 'police_station', 'A');
+  createSpecialBuilding(sJail, 'prison', 'B');
+  toggleVillageLaw(sJail, 'ban_fishing', true, 'Jugador');
+  jb.activeConstruction!.elapsed = 0;
+  assert.equal(enforceLawViolation(sJail, jb, 'ban_fishing'), true);
+  assert.equal(jb.jailedDays, 2);
+  assert.equal(jb.activeConstruction, null);
+  assert.equal(jb.inv.wood, 3);
+  cancelActiveConstruction(sJail, jb, 'no-op'); // seguro cuando null
+});
+
+test('Mantenimiento cada 30 días, deterioro progresivo (60/90/120/150d), puente bloqueado y reparación exacta', () => {
+  const state = createInitialState();
+  const builder = state.agents[0];
+  builder.job = 'Constructor';
+  const bridge = createBridge(state, builder.name);
+  const bank = createSpecialBuilding(state, 'bank', builder.name)!;
+  assert.equal(isBridgePassable(state), true);
+
+  // Ciclo 30 días sin materiales -> deuda + aviso (30d)
+  state.day = 31;
+  runThirtyDayMaintenance(state);
+  assert.equal(bridge.unpaidMaintenanceDays, 30);
+  assert.equal(bridge.maintenanceStatus, 'debt_warning');
+
+  // 60 días -> deteriorándose
+  state.day = 61;
+  runThirtyDayMaintenance(state);
+  assert.equal(bridge.unpaidMaintenanceDays, 60);
+  assert.equal(bridge.maintenanceStatus, 'deteriorating');
+
+  // 90 días -> mitad de eficiencia en edificio especial
+  state.day = 91;
+  runThirtyDayMaintenance(state);
+  assert.equal(bank.unpaidMaintenanceDays, 90);
+  assert.equal(bank.maintenanceStatus, 'half_efficiency');
+  assert.equal(bank.efficiencyMultiplier, 0.5);
+
+  // 120 días -> inoperativo y Puente inhabilitado para cruzar río
+  state.day = 121;
+  runThirtyDayMaintenance(state);
+  assert.equal(bridge.unpaidMaintenanceDays, 120);
+  assert.equal(bridge.maintenanceStatus, 'inoperative');
+  assert.equal(isBridgePassable(state), false);
+  assert.equal(bank.efficiencyMultiplier, 0);
+  assert.equal(bank.isOperational, false);
+
+  // 150 días -> en ruinas
+  state.day = 151;
+  runThirtyDayMaintenance(state);
+  assert.equal(bridge.maintenanceStatus, 'ruined');
+  assert.ok(bridge.durability <= 10);
+
+  // Reparación exacta restaura puente y banco y limpia deuda
+  builder.inv.oakWood = 10;
+  builder.inv.stone = 12;
+  builder.inv.iron = 10;
+  builder.inv.wood = 10;
+  const repaired = repairDamagedStructures(state, builder);
+  assert.ok(repaired >= 2);
+  assert.equal(bridge.durability, 100);
+  assert.equal(bridge.unpaidMaintenanceDays, 0);
+  assert.equal(bridge.maintenanceStatus, 'ok');
+  assert.equal(isBridgePassable(state), true);
+  assert.equal(bank.efficiencyMultiplier, 1);
+  assert.ok(state.resourceLedger.some((r) => r.operationType === 'reparacion'));
+});
+
+test('Edificios especiales: únicos max 1, otros max 3, mejora N2-N3 por era/saber y sin emisión gratuita', () => {
+  const state = createInitialState();
+  const builder = state.agents[0];
+  builder.job = 'Constructor';
+  builder.constructionKnowledge = 85;
+  builder.inv.wood = 120;
+  builder.inv.oakWood = 60;
+  builder.inv.stone = 120;
+  builder.inv.iron = 60;
+  builder.inv.copper = 40;
+  state.knowledge = 100;
+  state.era = 'iron';
+
+  // Banco es único (max 1) y NO regala monedas al construirse
+  const mintedBeforeBank = state.economyReserve.mintedCoins;
+  assert.equal(startConstructionProject(state, builder, 'special', { specialType: 'bank', duration: 1 }).ok, true);
+  assert.equal(completeActiveConstruction(state, builder), true);
+  assert.equal(state.specialBuildings.filter((b) => b.type === 'bank').length, 1);
+  assert.equal(state.economyReserve.mintedCoins, mintedBeforeBank);
+
+  const secondBank = startConstructionProject(state, builder, 'special', { specialType: 'bank' });
+  assert.equal(secondBank.ok, false);
+
+  // Mejora N1 -> N2 del Banco cuesta exactamente { stone: 8, oakWood: 6, iron: 5, copper: 3 }
+  const planN2 = validateAndComputeConstructionPlan(state, builder, 'upgrade_special', { specialType: 'bank' });
+  assert.equal(planN2.ok, true);
+  assert.deepEqual(planN2.cost, { stone: 8, oakWood: 6, iron: 5, copper: 3 });
+  assert.equal(startConstructionProject(state, builder, 'upgrade_special', { specialType: 'bank', duration: 1 }).ok, true);
+  assert.equal(completeActiveConstruction(state, builder), true);
+  assert.equal(state.specialBuildings.find((b) => b.type === 'bank')?.level, 2);
+
+  // Panadería admite hasta 3
+  builder.inv.pineWood = 20;
+  for (let i = 0; i < 3; i++) {
+    const sBak = startConstructionProject(state, builder, 'special', { specialType: 'bakery', duration: 1 });
+    assert.equal(sBak.ok, true);
+    assert.equal(completeActiveConstruction(state, builder), true);
+  }
+  assert.equal(state.specialBuildings.filter((b) => b.type === 'bakery').length, 3);
+  assert.equal(startConstructionProject(state, builder, 'special', { specialType: 'bakery' }).ok, false);
+});
+
+test('Qwen Responde: automático cada 30 min cuando está activo, manual cuando no, y rechazo de peticiones negativas', () => {
+  // 1) Con qwenAutoRespondPetitions = false, al vencer los 30m queda pendiente y pausa
+  const manualState = createInitialState();
+  manualState.speed = 2;
+  manualState.qwenAutoRespondPetitions = false;
+  manualState.petitionTimerSec = 1;
+  tickSimulation(manualState, 1.5);
+  assert.ok(manualState.pendingPetition !== null);
+  assert.equal(manualState.speed, 0);
+
+  // 2) Con qwenAutoRespondPetitions = true, al vencer los 30m Qwen 2.5 responde solo y no pausa
+  const autoState = createInitialState();
+  autoState.speed = 2;
+  autoState.qwenAutoRespondPetitions = true;
+  autoState.petitionTimerSec = 1;
+  const qwenMsgsBefore = autoState.qwenMessages.length;
+  tickSimulation(autoState, 1.5);
+  assert.equal(autoState.pendingPetition, null);
+  assert.equal(autoState.speed, 2);
+  assert.equal(autoState.petitionTimerSec, PETITION_INTERVAL_SECONDS);
+  assert.ok(autoState.qwenMessages.length > qwenMsgsBefore);
+
+  // 3) Criterio directo de resolvePetitionWithQwen: rechaza peticiones negativas (protegiendo salud/ánimo) y aprueba constructivas
+  const directState = createInitialState();
+  createVillagePetition(directState, true);
+  const happyNegBefore = directState.agents[0].happiness;
+  const resNeg = resolvePetitionWithQwen(directState);
+  assert.ok(resNeg.includes('No fue Escuchado'));
+  assert.ok(directState.agents[0].happiness >= happyNegBefore);
+
+  createVillagePetition(directState, false);
+  const happyPosBefore = directState.agents[0].happiness;
+  const resPos = resolvePetitionWithQwen(directState);
+  assert.ok(resPos.includes('Fue Escuchado'));
+  assert.ok(directState.agents[0].happiness >= happyPosBefore);
+});
+
+

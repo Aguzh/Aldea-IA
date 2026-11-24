@@ -33,6 +33,8 @@ import {
   depositResourcesToHouse,
   electRepresentative,
   FOREST_MAX_X,
+  formatResourceCost,
+  getRoadTileCost,
   getTotalCirculatingCoins,
   HOUSE_SIZE_CAPACITIES,
   infectAgent,
@@ -47,6 +49,7 @@ import {
   PETITION_INTERVAL_SECONDS,
   recalculateEconomyReserve,
   resolvePetition,
+  resolvePetitionWithQwen,
   RIVER_BOTTOM_Y,
   RIVER_TOP_Y,
   SAFE_LAND_MIN_Y,
@@ -68,6 +71,7 @@ import type {
   LayoutMode,
   OllamaConfig,
   ResourceInventory,
+  RoadType,
   SelectedEntity,
   SimulationState,
   VillageLawId,
@@ -163,20 +167,47 @@ function readSavedSummary(): { exists: boolean; info: string | null } {
 
 export function hydrateSimulationState(parsed: Partial<SimulationState>): SimulationState {
   const base = createInitialState();
+  const parsedDay = parsed.day ?? 1;
   const nextState: SimulationState = {
     ...base,
     ...parsed,
     selectedEntity: null,
     selectedAgentId: parsed.selectedAgentId ?? null,
-    season: parsed.season ?? computeSeason(parsed.day ?? 1),
-    plaza: parsed.plaza ?? null,
+    selectedRoadType: parsed.selectedRoadType ?? 'dirt',
+    selectedRoadLamp: parsed.selectedRoadLamp ?? false,
+    roadMaintenanceLastDay: parsed.roadMaintenanceLastDay ?? parsedDay,
+    roadUnpaidMaintenanceDays: parsed.roadUnpaidMaintenanceDays ?? 0,
+    season: parsed.season ?? computeSeason(parsedDay),
+    plaza: parsed.plaza
+      ? {
+          ...parsed.plaza,
+          durability: parsed.plaza.durability ?? 100,
+          unpaidMaintenanceDays: parsed.plaza.unpaidMaintenanceDays ?? 0,
+          maintenanceDebtCount: parsed.plaza.maintenanceDebtCount ?? 0,
+          maintenanceStatus: parsed.plaza.maintenanceStatus ?? 'ok',
+          lastMaintenanceDay: parsed.plaza.lastMaintenanceDay ?? parsed.plaza.builtDay ?? parsedDay,
+        }
+      : null,
     bridge: parsed.bridge
       ? {
           ...parsed.bridge,
           durability: parsed.bridge.durability ?? 100,
+          unpaidMaintenanceDays: parsed.bridge.unpaidMaintenanceDays ?? 0,
+          maintenanceDebtCount: parsed.bridge.maintenanceDebtCount ?? 0,
+          maintenanceStatus: parsed.bridge.maintenanceStatus ?? 'ok',
+          lastMaintenanceDay: parsed.bridge.lastMaintenanceDay ?? parsed.bridge.builtDay ?? parsedDay,
         }
       : null,
-    roads: Array.isArray(parsed.roads) ? parsed.roads : [],
+    roads: Array.isArray(parsed.roads)
+      ? parsed.roads.map((r) => ({
+          ...r,
+          roadType: r.roadType ?? 'dirt',
+          hasLamp: r.hasLamp ?? Boolean(r.lit),
+          lit: r.lit ?? Boolean(r.hasLamp),
+          durability: r.durability ?? 100,
+        }))
+      : [],
+    resourceLedger: Array.isArray(parsed.resourceLedger) ? parsed.resourceLedger : [],
     riverFishStock: parsed.riverFishStock ?? 18,
     riverFishMaxStock: parsed.riverFishMaxStock ?? 18,
     riverFishRestTimer: parsed.riverFishRestTimer ?? 0,
@@ -188,6 +219,7 @@ export function hydrateSimulationState(parsed: Partial<SimulationState>): Simula
     pendingPetition: parsed.pendingPetition ?? null,
     autoPausedByPetition: parsed.autoPausedByPetition ?? false,
     previousSpeedBeforePetition: parsed.previousSpeedBeforePetition ?? 1,
+    qwenAutoRespondPetitions: parsed.qwenAutoRespondPetitions ?? false,
     lightningFlashTimer: parsed.lightningFlashTimer ?? 0,
     lastCouncilDay: parsed.lastCouncilDay ?? 0,
     economyReserve: {
@@ -197,7 +229,7 @@ export function hydrateSimulationState(parsed: Partial<SimulationState>): Simula
       mintedCoins: parsed.economyReserve?.mintedCoins ?? 0,
       bankLoanPool: parsed.economyReserve?.bankLoanPool ?? 40,
       taxRatePct: parsed.economyReserve?.taxRatePct ?? 5,
-      lastTaxCollectedDay: parsed.economyReserve?.lastTaxCollectedDay ?? (parsed.day ?? 1),
+      lastTaxCollectedDay: parsed.economyReserve?.lastTaxCollectedDay ?? parsedDay,
     },
     specialBuildings: Array.isArray(parsed.specialBuildings)
       ? parsed.specialBuildings.map((b) => ({
@@ -206,6 +238,11 @@ export function hydrateSimulationState(parsed: Partial<SimulationState>): Simula
           forSale: b.forSale ?? b.ownerId === null,
           price: b.price ?? SPECIAL_BUILDING_LABELS[b.type]?.basePrice ?? 60,
           durability: b.durability ?? 100,
+          unpaidMaintenanceDays: b.unpaidMaintenanceDays ?? 0,
+          maintenanceDebtCount: b.maintenanceDebtCount ?? 0,
+          maintenanceStatus: b.maintenanceStatus ?? 'ok',
+          lastMaintenanceDay: b.lastMaintenanceDay ?? parsedDay,
+          efficiencyMultiplier: b.efficiencyMultiplier ?? 1,
           allowedStorage:
             Array.isArray(b.allowedStorage) && b.allowedStorage.length > 0
               ? b.allowedStorage
@@ -224,7 +261,15 @@ export function hydrateSimulationState(parsed: Partial<SimulationState>): Simula
         }))
       : [],
     farms: Array.isArray(parsed.farms)
-      ? parsed.farms.map((f) => ({ ...f, size: f.size ?? 'medium' }))
+      ? parsed.farms.map((f) => ({
+          ...f,
+          size: f.size ?? 'medium',
+          durability: f.durability ?? 100,
+          unpaidMaintenanceDays: f.unpaidMaintenanceDays ?? 0,
+          maintenanceDebtCount: f.maintenanceDebtCount ?? 0,
+          maintenanceStatus: f.maintenanceStatus ?? 'ok',
+          lastMaintenanceDay: f.lastMaintenanceDay ?? parsedDay,
+        }))
       : [],
     resources: Array.isArray(parsed.resources)
       ? parsed.resources.map((r) => ({
@@ -252,6 +297,7 @@ export function hydrateSimulationState(parsed: Partial<SimulationState>): Simula
             pregnancy: a.pregnancy ?? null,
             illness: a.illness ?? null,
             assignedBuildingId: a.assignedBuildingId ?? null,
+            activeConstruction: a.activeConstruction ?? null,
             inv: {
               food: a.inv?.food ?? 0,
               wood: a.inv?.wood ?? 0,
@@ -277,6 +323,10 @@ export function hydrateSimulationState(parsed: Partial<SimulationState>): Simula
             size,
             capacity: h.capacity ?? HOUSE_SIZE_CAPACITIES[size],
             durability: h.durability ?? 100,
+            unpaidMaintenanceDays: h.unpaidMaintenanceDays ?? 0,
+            maintenanceDebtCount: h.maintenanceDebtCount ?? 0,
+            maintenanceStatus: h.maintenanceStatus ?? 'ok',
+            lastMaintenanceDay: h.lastMaintenanceDay ?? parsedDay,
             storage: {
               ...createEmptyHouseStorage(0),
               food: h.storage?.food ?? 0,
@@ -684,8 +734,18 @@ export default function App() {
     }
 
     if (s.tool === 'add_road') {
-      const tile = addRoadTile(s, x, y);
-      if (tile) syncUI();
+      const tile = addRoadTile(s, x, y, s.selectedRoadType, s.selectedRoadLamp);
+      if (tile) {
+        syncUI();
+      } else {
+        const costText = formatResourceCost(getRoadTileCost(s.selectedRoadType, s.selectedRoadLamp));
+        addLog(
+          s,
+          `No se pudo colocar camino aquí: verifica terreno y stock en Constructor/Depósito (${costText}).`,
+          'amber'
+        );
+        syncUI();
+      }
       return;
     }
 
@@ -742,8 +802,17 @@ export default function App() {
       roadPaintingRef.current = true;
       const pt = screenToWorld(e.clientX, e.clientY);
       if (pt) {
-        const tile = addRoadTile(stateRef.current, pt.x, pt.y);
-        if (tile) syncUI();
+        const s = stateRef.current;
+        const tile = addRoadTile(s, pt.x, pt.y, s.selectedRoadType, s.selectedRoadLamp);
+        if (!tile) {
+          const costText = formatResourceCost(getRoadTileCost(s.selectedRoadType, s.selectedRoadLamp));
+          addLog(
+            s,
+            `Tramo no colocado: requiere terreno válido y ${costText} en Constructor/Depósito.`,
+            'amber'
+          );
+        }
+        syncUI();
       }
       return;
     }
@@ -756,7 +825,8 @@ export default function App() {
     if (roadPaintingRef.current && stateRef.current.tool === 'add_road') {
       const pt = screenToWorld(e.clientX, e.clientY);
       if (pt) {
-        const tile = addRoadTile(stateRef.current, pt.x, pt.y);
+        const s = stateRef.current;
+        const tile = addRoadTile(s, pt.x, pt.y, s.selectedRoadType, s.selectedRoadLamp);
         if (tile) syncUI();
       }
     }
@@ -785,10 +855,26 @@ export default function App() {
   }
 
   function handleBuildBaseRoads() {
-    const added = buildBaseRoads(stateRef.current);
+    const s = stateRef.current;
+    const added = buildBaseRoads(s, s.selectedRoadType, s.selectedRoadLamp);
     if (added === 0) {
-      addLog(stateRef.current, 'La red principal de caminos ya está trazada.', 'slate');
+      const costText = formatResourceCost(getRoadTileCost(s.selectedRoadType, s.selectedRoadLamp));
+      addLog(
+        s,
+        `Sin tramos nuevos: la red ya está cubierta o faltan materiales reales (${costText} por tramo).`,
+        'amber'
+      );
     }
+    syncUI();
+  }
+
+  function handleSelectRoadType(roadType: RoadType) {
+    stateRef.current.selectedRoadType = roadType;
+    syncUI();
+  }
+
+  function handleToggleRoadLamp() {
+    stateRef.current.selectedRoadLamp = !stateRef.current.selectedRoadLamp;
     syncUI();
   }
 
@@ -821,6 +907,29 @@ export default function App() {
 
   function handleResolvePetition(wasHeard: boolean) {
     resolvePetition(stateRef.current, wasHeard);
+    void saveStateToServer(true);
+    syncUI();
+  }
+
+  function handleResolvePetitionWithQwen() {
+    resolvePetitionWithQwen(stateRef.current);
+    void saveStateToServer(true);
+    syncUI();
+  }
+
+  function handleToggleQwenAutoRespond() {
+    const s = stateRef.current;
+    s.qwenAutoRespondPetitions = !s.qwenAutoRespondPetitions;
+    addLog(
+      s,
+      s.qwenAutoRespondPetitions
+        ? 'Qwen Responde activado: Qwen 2.5 responderá automáticamente las peticiones de cada 30 min.'
+        : 'Qwen Responde desactivado: volverás a decidir manualmente las peticiones del Representante.',
+      'violet'
+    );
+    if (s.qwenAutoRespondPetitions && s.pendingPetition) {
+      resolvePetitionWithQwen(s);
+    }
     void saveStateToServer(true);
     syncUI();
   }
@@ -1036,7 +1145,7 @@ export default function App() {
     if (!ok) {
       addLog(
         s,
-        `${agent.name} necesita 36%+ Saber y hierro, cobre o 2 de madera para fabricar herramientas.`,
+        `${agent.name} necesita 36%+ Saber, 1 Cobre y 1 Hierro (propios o en Depósito General) para forjar herramienta.`,
         'amber'
       );
     }
@@ -1285,6 +1394,8 @@ export default function App() {
             biome={state.biome}
             weather={state.weather}
             tool={state.tool}
+            selectedRoadType={state.selectedRoadType}
+            selectedRoadLamp={state.selectedRoadLamp}
             resourcesPaused={state.resourcesPaused}
             farmsCount={state.farms.length}
             roadsCount={state.roads.length}
@@ -1293,22 +1404,28 @@ export default function App() {
             loansCount={state.loans.length}
             riverFishStock={state.riverFishStock}
             riverFishMaxStock={state.riverFishMaxStock}
+            riverFishRestTimer={state.riverFishRestTimer}
             economyReserve={state.economyReserve}
             operationalBuildingsCount={operationalBuildingsCount}
             totalSpecialBuildingsCount={state.specialBuildings.length}
             laws={state.laws}
             representativeName={representativeName}
             petitionTimerSec={state.petitionTimerSec}
+            qwenAutoRespondPetitions={state.qwenAutoRespondPetitions}
             collectiveHint={computeCollectiveHint(state)}
+            resourceLedger={state.resourceLedger}
             onChangeBiome={handleChangeBiome}
             onChangeWeather={handleChangeWeather}
             onSelectTool={handleSelectTool}
+            onSelectRoadType={handleSelectRoadType}
+            onToggleRoadLamp={handleToggleRoadLamp}
             onToggleResourcesPaused={handleToggleResourcesPaused}
             onBuildBaseRoads={handleBuildBaseRoads}
             onKillAllCrops={handleKillAllCrops}
             onSpawnAnimal={handleSpawnAnimal}
             onToggleLaw={handleToggleLaw}
             onSummonPetition={handleSummonPetition}
+            onToggleQwenAutoRespond={handleToggleQwenAutoRespond}
             onTriggerLightningStorm={handleTriggerLightningStorm}
             onGrantRequest={handleGrantRequest}
             onTrialAbundance={handleTrialAbundance}
@@ -1427,6 +1544,25 @@ export default function App() {
                 No fue Escuchado
               </button>
             </div>
+
+            <button
+              type="button"
+              data-testid="petition-qwen-respond-btn"
+              onClick={handleResolvePetitionWithQwen}
+              className="w-full py-2 px-3 rounded-lg bg-violet-700 hover:bg-violet-600 border border-violet-500 text-white text-xs font-semibold transition-colors"
+            >
+              Qwen Responde (decidir con criterio de Qwen 2.5)
+            </button>
+
+            <label className="flex items-center gap-2 text-[11px] text-slate-300 bg-[#0b1120] border border-slate-800 rounded-lg px-2.5 py-2 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={state.qwenAutoRespondPetitions}
+                onChange={handleToggleQwenAutoRespond}
+                className="rounded border-slate-600 bg-slate-900 text-violet-500 focus:ring-violet-500"
+              />
+              <span>Activar &quot;Qwen Responde&quot; automático para los próximos mensajes (30m)</span>
+            </label>
           </div>
         </div>
       )}

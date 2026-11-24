@@ -1,9 +1,11 @@
 import type {
+  ActiveConstruction,
   Agent,
   Animal,
   AnimalType,
   BankLoan,
   BiomeType,
+  ConstructionOperationType,
   DaySnapshot,
   DiseaseId,
   DiseaseInfo,
@@ -17,10 +19,14 @@ import type {
   JobMasteryTier,
   JobType,
   LogEntry,
+  MaintenanceStatus,
   QwenAction,
   QwenPolicyState,
+  ResourceCostMap,
   ResourceInventory,
+  ResourceOperationRecord,
   RoadTile,
+  RoadType,
   SeasonType,
   SimulationState,
   SkillDefinition,
@@ -33,6 +39,67 @@ import type {
   WeatherType,
   WoodGrade,
 } from '../types/simulation';
+import {
+  BRIDGE_COSTS,
+  FARM_COSTS,
+  HOUSE_CONSTRUCTION_COSTS,
+  HOUSE_MAINTENANCE_COSTS,
+  HOUSE_REPAIR_COSTS,
+  HOUSE_UPGRADE_COSTS,
+  MAINTENANCE_CYCLE_DAYS,
+  PLAZA_COSTS,
+  PRODUCTION_INPUT_COSTS,
+  PROGRESSIVE_WEAR_THRESHOLDS,
+  RESOURCE_DISPLAY_NAMES,
+  ROAD_COSTS,
+  SPECIAL_BUILDING_COSTS,
+  SPECIAL_BUILDING_REPAIR_COSTS,
+  formatResourceCost,
+  getFarmCost,
+  getHouseBuildCost,
+  getHouseMaintenanceCost,
+  getHouseRepairCost,
+  getHouseUpgradeCost,
+  getMaintenanceStatusFromUnpaidDays,
+  getMaintenanceStatusLabel,
+  getRoadMaintenanceCost,
+  getRoadRepairCost,
+  getRoadTileCost,
+  getSpecialBuildingCost,
+  getSpecialBuildingMaintenanceCost,
+  getSpecialBuildingRepairCost,
+} from './economyConfig';
+
+export {
+  BRIDGE_COSTS,
+  FARM_COSTS,
+  HOUSE_CONSTRUCTION_COSTS,
+  HOUSE_MAINTENANCE_COSTS,
+  HOUSE_REPAIR_COSTS,
+  HOUSE_UPGRADE_COSTS,
+  MAINTENANCE_CYCLE_DAYS,
+  PLAZA_COSTS,
+  PRODUCTION_INPUT_COSTS,
+  PROGRESSIVE_WEAR_THRESHOLDS,
+  RESOURCE_DISPLAY_NAMES,
+  ROAD_COSTS,
+  SPECIAL_BUILDING_COSTS,
+  SPECIAL_BUILDING_REPAIR_COSTS,
+  formatResourceCost,
+  getFarmCost,
+  getHouseBuildCost,
+  getHouseMaintenanceCost,
+  getHouseRepairCost,
+  getHouseUpgradeCost,
+  getMaintenanceStatusFromUnpaidDays,
+  getMaintenanceStatusLabel,
+  getRoadMaintenanceCost,
+  getRoadRepairCost,
+  getRoadTileCost,
+  getSpecialBuildingCost,
+  getSpecialBuildingMaintenanceCost,
+  getSpecialBuildingRepairCost,
+};
 
 export const CANVAS_WIDTH = 1440;
 export const CANVAS_HEIGHT = 960;
@@ -79,6 +146,7 @@ export const DAYS_PER_SEASON = 30;
 export const DAYS_PER_YEAR = 120;
 export const PREGNANCY_DAYS = 3;
 export const PETITION_INTERVAL_SECONDS = 1800; // 30 minutos reales
+export const RIVER_FISH_RESTOCK_DAYS = 3; // El río tarda 3 días en renovar los peces
 
 // Edades exactas
 export const AGE_CHILD_MAX_YEARS = 5;
@@ -454,6 +522,12 @@ export function isPointInRiverWater(
   if (y < RIVER_TOP_Y - 6 || y > RIVER_BOTTOM_Y + 6) return false;
   if (bridgeX !== null && Math.abs(x - bridgeX) <= BRIDGE_HALF_WIDTH) return false;
   return true;
+}
+
+export function isBridgePassable(state: Pick<SimulationState, 'bridge'>): boolean {
+  const bridge = state.bridge;
+  if (!bridge) return false;
+  return bridge.durability > 10 && (bridge.unpaidMaintenanceDays ?? 0) < PROGRESSIVE_WEAR_THRESHOLDS.inoperativeDays;
 }
 
 export function computeSeason(day: number): SeasonType {
@@ -975,16 +1049,30 @@ export function findOperatorCandidateForBuilding(
   );
   if (flexible) return flexible;
 
-  // Segundo nivel: cualquier otro adulto sin edificio asignado ni rol médico crítico
+  // Segundo nivel: cualquier otro adulto sin edificio asignado ni rol médico o de construcción activo
   const secondary = state.agents.find(
     (a) =>
       !a.isChild &&
       a.ageYears >= 15 &&
       a.jailedDays <= 0 &&
       a.assignedBuildingId === null &&
+      !a.activeConstruction &&
+      a.job !== 'Curandero' &&
+      a.job !== 'Constructor'
+  );
+  if (secondary) return secondary;
+
+  // Último recurso (ej. aldea con 1 solo adulto): cualquiera sin edificio asignado ni obra activa
+  const fallback = state.agents.find(
+    (a) =>
+      !a.isChild &&
+      a.ageYears >= 15 &&
+      a.jailedDays <= 0 &&
+      a.assignedBuildingId === null &&
+      !a.activeConstruction &&
       a.job !== 'Curandero'
   );
-  return secondary ?? null;
+  return fallback ?? null;
 }
 
 export function hasAvailableOperatorForBuilding(
@@ -1041,7 +1129,24 @@ export function syncSpecialBuildingStaff(state: SimulationState): void {
       }
     }
     b.staffIds = staff;
-    b.isOperational = staff.length > 0 && b.durability > 10;
+    const unpaidDays = b.unpaidMaintenanceDays ?? 0;
+    if (typeof b.unpaidMaintenanceDays !== 'number') b.unpaidMaintenanceDays = 0;
+    if (typeof b.maintenanceDebtCount !== 'number') b.maintenanceDebtCount = 0;
+    if (!b.maintenanceStatus) {
+      b.maintenanceStatus = getMaintenanceStatusFromUnpaidDays(b.unpaidMaintenanceDays);
+    }
+    if (typeof b.lastMaintenanceDay !== 'number') b.lastMaintenanceDay = state.day;
+
+    if (unpaidDays >= PROGRESSIVE_WEAR_THRESHOLDS.inoperativeDays || b.durability <= 10) {
+      b.efficiencyMultiplier = 0;
+      b.isOperational = false;
+    } else if (unpaidDays >= PROGRESSIVE_WEAR_THRESHOLDS.halfEfficiencyDays) {
+      b.efficiencyMultiplier = 0.5;
+      b.isOperational = staff.length > 0;
+    } else {
+      b.efficiencyMultiplier = 1;
+      b.isOperational = staff.length > 0 && b.durability > 10;
+    }
   }
 }
 
@@ -1373,155 +1478,235 @@ export function modifySpecialBuildingStorage(
   return true;
 }
 
+export function recordResourceOperation(
+  state: SimulationState,
+  entry: Omit<ResourceOperationRecord, 'id' | 'day'>
+): ResourceOperationRecord {
+  if (!Array.isArray(state.resourceLedger)) state.resourceLedger = [];
+  const rec: ResourceOperationRecord = {
+    id: state.nextId++,
+    day: state.day,
+    ...entry,
+  };
+  state.resourceLedger.unshift(rec);
+  if (state.resourceLedger.length > 120) state.resourceLedger.length = 120;
+  return rec;
+}
+
+export function getOperationalDepots(state: SimulationState): SpecialBuilding[] {
+  return state.specialBuildings.filter((b) => b.type === 'general_depot' && b.isOperational);
+}
+
+export function canApplyCarpentryHousingDiscount(state: SimulationState, cost: ResourceCostMap): boolean {
+  const hasWoodDiscountTarget =
+    (cost.wood ?? 0) > 1 || (cost.pineWood ?? 0) > 2 || (cost.oakWood ?? 0) > 2;
+  if (!hasWoodDiscountTarget) return false;
+  const carpentry = state.specialBuildings.find((b) => b.type === 'carpentry' && b.isOperational);
+  if (!carpentry) return false;
+  return carpentry.storage.wood >= 1 || carpentry.storage.pineWood >= 1;
+}
+
+export function consumeCarpentryHousingDiscount(
+  state: SimulationState,
+  actorName: string,
+  targetName: string
+): boolean {
+  const carpentry = state.specialBuildings.find((b) => b.type === 'carpentry' && b.isOperational);
+  if (!carpentry) return false;
+  let consumedKey: 'wood' | 'pineWood' | null = null;
+  if (carpentry.storage.wood >= 1) {
+    carpentry.storage.wood -= 1;
+    consumedKey = 'wood';
+  } else if (carpentry.storage.pineWood >= 1) {
+    carpentry.storage.pineWood -= 1;
+    consumedKey = 'pineWood';
+  }
+  if (!consumedKey) return false;
+  recordResourceOperation(state, {
+    actorName,
+    targetName,
+    operationType: 'produccion',
+    materials: { [consumedKey]: 1 },
+    source: `${carpentry.name}`,
+    result: 'Descuento -1 madera en vivienda',
+  });
+  return true;
+}
+
+export interface MaterialReservationResult {
+  ok: boolean;
+  fromPersonal: ResourceCostMap;
+  fromDepot: ResourceCostMap;
+  missing: ResourceCostMap;
+}
+
 /**
- * Consume recursos estrictamente de inventarios y baúles/depósitos reales.
+ * Reserva y descuenta materiales EXACTOS (sin sustituir maderas) ÚNICAMENTE desde:
+ * (1) Inventario personal del aldeano/constructor, y
+ * (2) Depósito General operativo (extracción registrada en resourceLedger).
+ * Está estrictamente prohibido descontar de otros aldeanos, casas o edificios ajenos.
  */
-export function consumeConstructionResources(
+export function reserveConstructionMaterials(
   state: SimulationState,
   builder: Agent | null,
-  reqs: Partial<Record<keyof ResourceInventory, number>>,
-  allowVillageChests = true
-): boolean {
-  const storages: Array<{
-    get: (k: keyof ResourceInventory) => number;
-    sub: (k: keyof ResourceInventory, amt: number) => void;
-  }> = [];
-
-  if (builder) {
-    storages.push({
-      get: (k) => builder.inv[k],
-      sub: (k, amt) => {
-        builder.inv[k] -= amt;
-      },
-    });
-    const ownHouse = builder.houseId !== null ? state.houses.find((h) => h.id === builder.houseId) : null;
-    if (ownHouse) {
-      storages.push({
-        get: (k) => ownHouse.storage[k],
-        sub: (k, amt) => {
-          ownHouse.storage[k] -= amt;
-        },
-      });
-    }
-    const ownBiz =
-      builder.assignedBuildingId !== null
-        ? state.specialBuildings.find((b) => b.id === builder.assignedBuildingId)
-        : null;
-    if (ownBiz) {
-      storages.push({
-        get: (k) => ownBiz.storage[k],
-        sub: (k, amt) => {
-          ownBiz.storage[k] -= amt;
-        },
-      });
-    }
-  }
-
-  if (allowVillageChests) {
-    for (const h of state.houses) {
-      if (builder && h.id === builder.houseId) continue;
-      storages.push({
-        get: (k) => h.storage[k],
-        sub: (k, amt) => {
-          h.storage[k] -= amt;
-        },
-      });
-    }
-    for (const b of state.specialBuildings) {
-      if (builder && b.id === builder.assignedBuildingId) continue;
-      storages.push({
-        get: (k) => b.storage[k],
-        sub: (k, amt) => {
-          b.storage[k] -= amt;
-        },
-      });
-    }
-    for (const a of state.agents) {
-      if (builder && a.id === builder.id) continue;
-      storages.push({
-        get: (k) => a.inv[k],
-        sub: (k, amt) => {
-          a.inv[k] -= amt;
-        },
-      });
-    }
-  }
+  reqs: ResourceCostMap,
+  allowDepotExtraction = true,
+  targetName = 'Obra',
+  operationType: ConstructionOperationType = 'construccion'
+): MaterialReservationResult {
+  const depots = allowDepotExtraction ? getOperationalDepots(state) : [];
+  const missing: ResourceCostMap = {};
 
   for (const [rawKey, rawNeed] of Object.entries(reqs)) {
     const key = rawKey as keyof ResourceInventory;
     const need = rawNeed ?? 0;
     if (need <= 0) continue;
-    let totalAvail = 0;
-    if (key === 'wood') {
-      for (const s of storages) {
-        totalAvail += s.get('wood') + s.get('pineWood') + s.get('mapleWood') + s.get('oakWood');
-      }
-    } else {
-      for (const s of storages) totalAvail += s.get(key);
+    const personalAvail = builder ? builder.inv[key] : 0;
+    const depotAvail = depots.reduce((acc, d) => acc + d.storage[key], 0);
+    const total = personalAvail + depotAvail;
+    if (total < need) {
+      missing[key] = need - total;
     }
-    if (totalAvail < need) return false;
   }
 
+  if (Object.keys(missing).length > 0) {
+    return { ok: false, fromPersonal: {}, fromDepot: {}, missing };
+  }
+
+  const fromPersonal: ResourceCostMap = {};
+  const fromDepot: ResourceCostMap = {};
+
   for (const [rawKey, rawNeed] of Object.entries(reqs)) {
-    let remaining = rawNeed ?? 0;
     const key = rawKey as keyof ResourceInventory;
+    let remaining = rawNeed ?? 0;
     if (remaining <= 0) continue;
 
-    if (key === 'wood') {
-      const subOrder: Array<keyof ResourceInventory> = ['wood', 'pineWood', 'mapleWood', 'oakWood'];
-      for (const wk of subOrder) {
-        for (const s of storages) {
-          if (remaining <= 0) break;
-          const avail = s.get(wk);
-          if (avail > 0) {
-            const take = Math.min(avail, remaining);
-            s.sub(wk, take);
-            remaining -= take;
-          }
-        }
+    if (builder && builder.inv[key] > 0) {
+      const take = Math.min(builder.inv[key], remaining);
+      builder.inv[key] -= take;
+      fromPersonal[key] = (fromPersonal[key] ?? 0) + take;
+      remaining -= take;
+    }
+
+    if (remaining > 0) {
+      for (const depot of depots) {
         if (remaining <= 0) break;
-      }
-    } else {
-      for (const s of storages) {
-        if (remaining <= 0) break;
-        const avail = s.get(key);
+        const avail = depot.storage[key];
         if (avail > 0) {
           const take = Math.min(avail, remaining);
-          s.sub(key, take);
+          depot.storage[key] -= take;
+          fromDepot[key] = (fromDepot[key] ?? 0) + take;
           remaining -= take;
         }
       }
     }
   }
 
-  return true;
+  const actorName = builder?.name ?? 'Alcaldía / Depósito';
+  if (Object.keys(fromDepot).length > 0) {
+    recordResourceOperation(state, {
+      actorName,
+      targetName,
+      operationType: 'extraccion_deposito',
+      materials: fromDepot,
+      source: 'Depósito General',
+      result: 'Extracción autorizada',
+    });
+  }
+
+  const usedTotal = Object.values(reqs).some((v) => (v ?? 0) > 0);
+  if (usedTotal) {
+    const sourceLabel =
+      Object.keys(fromPersonal).length > 0 && Object.keys(fromDepot).length > 0
+        ? 'Personal + Depósito General'
+        : Object.keys(fromDepot).length > 0
+          ? 'Depósito General'
+          : `Inventario (${actorName})`;
+    recordResourceOperation(state, {
+      actorName,
+      targetName,
+      operationType,
+      materials: reqs,
+      source: sourceLabel,
+      result: 'Confirmado',
+    });
+  }
+
+  return { ok: true, fromPersonal, fromDepot, missing: {} };
+}
+
+export function consumeConstructionResources(
+  state: SimulationState,
+  builder: Agent | null,
+  reqs: ResourceCostMap,
+  allowDepotExtraction = true,
+  targetName = 'Obra',
+  operationType: ConstructionOperationType = 'construccion'
+): boolean {
+  return reserveConstructionMaterials(
+    state,
+    builder,
+    reqs,
+    allowDepotExtraction,
+    targetName,
+    operationType
+  ).ok;
 }
 
 export function craftToolsForAgent(state: SimulationState, agent: Agent): boolean {
   if (agent.education < 36) return false;
-  const depot = state.specialBuildings.find((b) => b.type === 'general_depot' && b.isOperational);
-  if (agent.inv.iron > 0) {
-    agent.inv.iron -= 1;
-    agent.toolsCount += 1;
-  } else if (agent.inv.copper > 0) {
-    agent.inv.copper -= 1;
-    agent.toolsCount += 1;
-  } else if (depot && depot.storage.iron > 0) {
-    depot.storage.iron -= 1;
-    agent.toolsCount += 1;
-  } else if (agent.inv.wood >= 2) {
-    agent.inv.wood -= 2;
-    agent.toolsCount += 1;
-  } else if (agent.inv.pineWood >= 2 && canCarpenterUseWood(agent, 'pine')) {
-    agent.inv.pineWood -= 2;
-    agent.toolsCount += 1;
-  } else {
+  const need = PRODUCTION_INPUT_COSTS.forgeTool; // 1 copper + 1 iron
+  const depots = getOperationalDepots(state);
+  const forges = state.specialBuildings.filter((b) => b.type === 'forge' && b.isOperational);
+
+  const availCopper =
+    agent.inv.copper +
+    forges.reduce((acc, f) => acc + f.storage.copper, 0) +
+    depots.reduce((acc, d) => acc + d.storage.copper, 0);
+  const availIron =
+    agent.inv.iron +
+    forges.reduce((acc, f) => acc + f.storage.iron, 0) +
+    depots.reduce((acc, d) => acc + d.storage.iron, 0);
+
+  if (availCopper < (need.copper ?? 1) || availIron < (need.iron ?? 1)) {
     return false;
   }
+
+  const takeUnit = (key: 'copper' | 'iron'): string => {
+    if (agent.inv[key] > 0) {
+      agent.inv[key] -= 1;
+      return `Inventario (${agent.name})`;
+    }
+    for (const f of forges) {
+      if (f.storage[key] > 0) {
+        f.storage[key] -= 1;
+        return f.name;
+      }
+    }
+    for (const d of depots) {
+      if (d.storage[key] > 0) {
+        d.storage[key] -= 1;
+        return d.name;
+      }
+    }
+    return '';
+  };
+
+  const srcCopper = takeUnit('copper');
+  const srcIron = takeUnit('iron');
+  agent.toolsCount += 1;
   state.knowledge += 3;
   agent.constructionKnowledge = clamp(agent.constructionKnowledge + 4, 0, 100);
   advanceJobMastery(agent, 'Herrero', 4);
-  addLog(state, `${agent.name} fabricó herramientas con su conocimiento (${Math.round(agent.education)}% Saber).`, 'amber');
+  recordResourceOperation(state, {
+    actorName: agent.name,
+    targetName: 'Herramientas',
+    operationType: 'produccion',
+    materials: need,
+    source: srcCopper === srcIron ? srcCopper : `${srcCopper} + ${srcIron}`,
+    result: '+1 Herramienta forjada',
+  });
+  addLog(state, `${agent.name} forjó herramientas (1 Cobre + 1 Hierro).`, 'amber');
   return true;
 }
 
@@ -1909,9 +2094,210 @@ export function progressDiseasesDaily(state: SimulationState, agent: Agent): { d
   return { diedFromDisease: agent.health <= 0, recovered: false };
 }
 
+function applyProgressiveWearToStructure(
+  structure: {
+    durability: number;
+    unpaidMaintenanceDays: number;
+    maintenanceDebtCount: number;
+    maintenanceStatus: MaintenanceStatus;
+    lastMaintenanceDay: number;
+    efficiencyMultiplier?: number;
+    isOperational?: boolean;
+  },
+  day: number,
+  paid: boolean
+): void {
+  structure.lastMaintenanceDay = day;
+  if (paid) {
+    structure.unpaidMaintenanceDays = 0;
+    structure.maintenanceDebtCount = 0;
+    structure.maintenanceStatus = 'ok';
+    structure.durability = clamp(structure.durability + 10, 0, 100);
+    if (typeof structure.efficiencyMultiplier === 'number') structure.efficiencyMultiplier = 1;
+    return;
+  }
+
+  structure.unpaidMaintenanceDays = (structure.unpaidMaintenanceDays ?? 0) + MAINTENANCE_CYCLE_DAYS;
+  structure.maintenanceDebtCount = (structure.maintenanceDebtCount ?? 0) + 1;
+  structure.maintenanceStatus = getMaintenanceStatusFromUnpaidDays(structure.unpaidMaintenanceDays);
+
+  if (structure.unpaidMaintenanceDays >= PROGRESSIVE_WEAR_THRESHOLDS.ruinedDays) {
+    structure.durability = Math.min(structure.durability, 8);
+    if (typeof structure.efficiencyMultiplier === 'number') structure.efficiencyMultiplier = 0;
+    if (typeof structure.isOperational === 'boolean') structure.isOperational = false;
+  } else if (structure.unpaidMaintenanceDays >= PROGRESSIVE_WEAR_THRESHOLDS.inoperativeDays) {
+    structure.durability = clamp(structure.durability - 18, 0, 100);
+    if (typeof structure.efficiencyMultiplier === 'number') structure.efficiencyMultiplier = 0;
+    if (typeof structure.isOperational === 'boolean') structure.isOperational = false;
+  } else if (structure.unpaidMaintenanceDays >= PROGRESSIVE_WEAR_THRESHOLDS.halfEfficiencyDays) {
+    structure.durability = clamp(structure.durability - 15, 0, 100);
+    if (typeof structure.efficiencyMultiplier === 'number') structure.efficiencyMultiplier = 0.5;
+  } else if (structure.unpaidMaintenanceDays >= PROGRESSIVE_WEAR_THRESHOLDS.deterioratingDays) {
+    structure.durability = clamp(structure.durability - 15, 0, 100);
+  }
+}
+
+export function runThirtyDayMaintenance(state: SimulationState): {
+  paidCount: number;
+  unpaidCount: number;
+} {
+  let paidCount = 0;
+  let unpaidCount = 0;
+  const constructorAgent =
+    state.agents.find((a) => !a.isChild && a.jailedDays <= 0 && a.job === 'Constructor') ?? null;
+
+  for (const h of state.houses) {
+    const lastDay = h.lastMaintenanceDay ?? 1;
+    if (state.day - lastDay < MAINTENANCE_CYCLE_DAYS) continue;
+    const cost = getHouseMaintenanceCost(h.size, h.level);
+    const resident =
+      state.agents.find((a) => a.houseId === h.id && !a.isChild && a.jailedDays <= 0) ?? null;
+    const paid = consumeConstructionResources(state, resident, cost, true, h.name, 'mantenimiento');
+    applyProgressiveWearToStructure(h, state.day, paid);
+    if (paid) {
+      paidCount++;
+    } else {
+      unpaidCount++;
+      recordResourceOperation(state, {
+        actorName: resident?.name ?? 'Sin pagador',
+        targetName: h.name,
+        operationType: 'mantenimiento',
+        materials: cost,
+        source: 'Personal / Depósito General',
+        result: `${getMaintenanceStatusLabel(h.maintenanceStatus)}`,
+      });
+    }
+  }
+
+  for (const b of state.specialBuildings) {
+    const lastDay = b.lastMaintenanceDay ?? 1;
+    if (state.day - lastDay < MAINTENANCE_CYCLE_DAYS) continue;
+    const clampedLv = clamp(b.level, 1, 3) as 1 | 2 | 3;
+    const cost = getSpecialBuildingMaintenanceCost(b.type, clampedLv);
+    const staffAgent =
+      state.agents.find((a) => b.staffIds.includes(a.id) && a.jailedDays <= 0) ?? null;
+    const paid = consumeConstructionResources(state, staffAgent, cost, true, b.name, 'mantenimiento');
+    applyProgressiveWearToStructure(b, state.day, paid);
+    if (paid) {
+      paidCount++;
+    } else {
+      unpaidCount++;
+      recordResourceOperation(state, {
+        actorName: staffAgent?.name ?? 'Sin operario',
+        targetName: b.name,
+        operationType: 'mantenimiento',
+        materials: cost,
+        source: 'Personal / Depósito General',
+        result: `${getMaintenanceStatusLabel(b.maintenanceStatus)}`,
+      });
+    }
+  }
+
+  if (state.plaza && state.day - (state.plaza.lastMaintenanceDay ?? 1) >= MAINTENANCE_CYCLE_DAYS) {
+    const paid = consumeConstructionResources(
+      state,
+      constructorAgent,
+      PLAZA_COSTS.maintenance,
+      true,
+      'Plaza Central',
+      'mantenimiento'
+    );
+    applyProgressiveWearToStructure(state.plaza, state.day, paid);
+    if (paid) paidCount++;
+    else unpaidCount++;
+  }
+
+  if (state.bridge && state.day - (state.bridge.lastMaintenanceDay ?? 1) >= MAINTENANCE_CYCLE_DAYS) {
+    const paid = consumeConstructionResources(
+      state,
+      constructorAgent,
+      BRIDGE_COSTS.maintenance,
+      true,
+      'Puente Fluvial',
+      'mantenimiento'
+    );
+    applyProgressiveWearToStructure(state.bridge, state.day, paid);
+    if (paid) paidCount++;
+    else {
+      unpaidCount++;
+      if ((state.bridge.unpaidMaintenanceDays ?? 0) >= PROGRESSIVE_WEAR_THRESHOLDS.inoperativeDays) {
+        addLog(
+          state,
+          'El Puente Fluvial quedó inoperativo por falta de mantenimiento (120+ días): el cruce Norte-Sur está bloqueado.',
+          'rose'
+        );
+      }
+    }
+  }
+
+  for (const f of state.farms) {
+    if (state.day - (f.lastMaintenanceDay ?? 1) < MAINTENANCE_CYCLE_DAYS) continue;
+    const cost = getFarmCost(f.size).maintenance;
+    const farmer =
+      state.agents.find((a) => !a.isChild && a.jailedDays <= 0 && a.job === 'Agricultor') ?? null;
+    const paid = consumeConstructionResources(
+      state,
+      farmer,
+      cost,
+      true,
+      `Cultivo ${f.cropName}`,
+      'mantenimiento'
+    );
+    applyProgressiveWearToStructure(f, state.day, paid);
+    if (paid) paidCount++;
+    else unpaidCount++;
+  }
+
+  if (
+    state.roads.length > 0 &&
+    state.day - (state.roadMaintenanceLastDay ?? 1) >= MAINTENANCE_CYCLE_DAYS
+  ) {
+    const roadCost = getRoadMaintenanceCost(state.roads);
+    const paid = consumeConstructionResources(
+      state,
+      constructorAgent,
+      roadCost,
+      true,
+      `Red de Caminos (${state.roads.length})`,
+      'mantenimiento'
+    );
+    state.roadMaintenanceLastDay = state.day;
+    if (paid) {
+      state.roadUnpaidMaintenanceDays = 0;
+      for (const r of state.roads) {
+        r.durability = clamp((r.durability ?? 100) + 12, 0, 100);
+        if (r.hasLamp) r.lit = true;
+      }
+      paidCount++;
+    } else {
+      state.roadUnpaidMaintenanceDays = (state.roadUnpaidMaintenanceDays ?? 0) + MAINTENANCE_CYCLE_DAYS;
+      for (const r of state.roads) {
+        r.durability = clamp((r.durability ?? 100) - 18, 0, 100);
+        if (state.roadUnpaidMaintenanceDays >= PROGRESSIVE_WEAR_THRESHOLDS.inoperativeDays) {
+          r.lit = false;
+        }
+      }
+      unpaidCount++;
+    }
+  }
+
+  if (unpaidCount > 0) {
+    addLog(
+      state,
+      `Mantenimiento 30d: ${paidCount} estructuras al día, ${unpaidCount} con deuda acumulada.`,
+      'amber'
+    );
+  } else if (paidCount > 0) {
+    addLog(state, `Mantenimiento 30d completado en ${paidCount} estructura(s) de la aldea.`, 'sky');
+  }
+
+  syncSpecialBuildingStaff(state);
+  return { paidCount, unpaidCount };
+}
+
 export function applyBuildingWear(state: SimulationState): void {
   const weatherDamage =
-    state.weather === 'thunderstorm' ? 4 : state.weather === 'storm' ? 2.5 : state.season === 'Invierno' ? 1.4 : 0.6;
+    state.weather === 'thunderstorm' ? 3.5 : state.weather === 'storm' ? 2 : state.season === 'Invierno' ? 1 : 0.4;
 
   for (const h of state.houses) {
     h.durability = clamp(h.durability - weatherDamage, 0, 100);
@@ -1919,33 +2305,113 @@ export function applyBuildingWear(state: SimulationState): void {
   for (const b of state.specialBuildings) {
     b.durability = clamp(b.durability - weatherDamage * 0.9, 0, 100);
   }
+  if (state.plaza) {
+    state.plaza.durability = clamp((state.plaza.durability ?? 100) - weatherDamage * 0.6, 0, 100);
+  }
   if (state.bridge) {
     state.bridge.durability = clamp(state.bridge.durability - weatherDamage * 0.8, 0, 100);
   }
+  for (const f of state.farms) {
+    f.durability = clamp((f.durability ?? 100) - weatherDamage * 0.5, 0, 100);
+  }
+
+  runThirtyDayMaintenance(state);
 }
 
 export function repairDamagedStructures(state: SimulationState, agent?: Agent | null): number {
   let repaired = 0;
   for (const h of state.houses) {
-    if (h.durability < 80) {
-      if (consumeConstructionResources(state, agent ?? null, { wood: 1 })) {
-        h.durability = clamp(h.durability + 32, 0, 100);
+    if (h.durability < 80 || (h.unpaidMaintenanceDays ?? 0) > 0 || h.maintenanceStatus !== 'ok') {
+      const repairCost = getHouseRepairCost(h.level);
+      if (consumeConstructionResources(state, agent ?? null, repairCost, true, h.name, 'reparacion')) {
+        h.durability = 100;
+        h.unpaidMaintenanceDays = 0;
+        h.maintenanceDebtCount = 0;
+        h.maintenanceStatus = 'ok';
+        h.lastMaintenanceDay = state.day;
         repaired++;
       }
     }
   }
   for (const b of state.specialBuildings) {
-    if (b.durability < 80) {
-      if (consumeConstructionResources(state, agent ?? null, { wood: 1, stone: 1 })) {
-        b.durability = clamp(b.durability + 35, 0, 100);
+    if (b.durability < 80 || (b.unpaidMaintenanceDays ?? 0) > 0 || b.maintenanceStatus !== 'ok') {
+      const repairCost = getSpecialBuildingRepairCost(clamp(b.level, 1, 3) as 1 | 2 | 3);
+      if (consumeConstructionResources(state, agent ?? null, repairCost, true, b.name, 'reparacion')) {
+        b.durability = 100;
+        b.unpaidMaintenanceDays = 0;
+        b.maintenanceDebtCount = 0;
+        b.maintenanceStatus = 'ok';
+        b.lastMaintenanceDay = state.day;
+        b.efficiencyMultiplier = 1;
         repaired++;
       }
     }
   }
-  if (state.bridge && state.bridge.durability < 80) {
-    if (consumeConstructionResources(state, agent ?? null, { wood: 1, stone: 1 })) {
-      state.bridge.durability = clamp(state.bridge.durability + 35, 0, 100);
+  if (
+    state.plaza &&
+    ((state.plaza.durability ?? 100) < 80 ||
+      (state.plaza.unpaidMaintenanceDays ?? 0) > 0 ||
+      state.plaza.maintenanceStatus !== 'ok')
+  ) {
+    if (
+      consumeConstructionResources(
+        state,
+        agent ?? null,
+        PLAZA_COSTS.repair,
+        true,
+        'Plaza Central',
+        'reparacion'
+      )
+    ) {
+      state.plaza.durability = 100;
+      state.plaza.unpaidMaintenanceDays = 0;
+      state.plaza.maintenanceDebtCount = 0;
+      state.plaza.maintenanceStatus = 'ok';
+      state.plaza.lastMaintenanceDay = state.day;
       repaired++;
+    }
+  }
+  if (
+    state.bridge &&
+    (state.bridge.durability < 80 ||
+      (state.bridge.unpaidMaintenanceDays ?? 0) > 0 ||
+      state.bridge.maintenanceStatus !== 'ok')
+  ) {
+    if (
+      consumeConstructionResources(
+        state,
+        agent ?? null,
+        BRIDGE_COSTS.repair,
+        true,
+        'Puente Fluvial',
+        'reparacion'
+      )
+    ) {
+      state.bridge.durability = 100;
+      state.bridge.unpaidMaintenanceDays = 0;
+      state.bridge.maintenanceDebtCount = 0;
+      state.bridge.maintenanceStatus = 'ok';
+      state.bridge.lastMaintenanceDay = state.day;
+      repaired++;
+    }
+  }
+  for (const r of state.roads) {
+    if ((r.durability ?? 100) < 60) {
+      const rCost = getRoadRepairCost(r.roadType ?? 'dirt');
+      if (
+        consumeConstructionResources(
+          state,
+          agent ?? null,
+          rCost,
+          true,
+          `Camino (${r.x},${r.y})`,
+          'reparacion'
+        )
+      ) {
+        r.durability = 100;
+        if (r.hasLamp) r.lit = true;
+        repaired++;
+      }
     }
   }
   if (repaired > 0 && agent) {
@@ -2177,7 +2643,38 @@ export function createVillagePetition(
   return petition;
 }
 
-export function resolvePetition(state: SimulationState, wasHeard: boolean): string {
+export function decidePetitionByQwen(
+  state: SimulationState,
+  petition: VillagePetition
+): { wasHeard: boolean; reason: string } {
+  const avgHappy =
+    state.agents.reduce((acc, a) => acc + a.happiness, 0) / Math.max(1, state.agents.length);
+  const sickCount = state.agents.filter((a) => a.isSick).length;
+  const homelessCount = state.agents.filter((a) => a.houseId === null).length;
+
+  if (petition.isNegative) {
+    return {
+      wasHeard: false,
+      reason: `Qwen 2.5 rechazó "${petition.title}" porque dañaría la salud y estabilidad (ánimo prom. ${Math.round(avgHappy)}%).`,
+    };
+  }
+
+  return {
+    wasHeard: true,
+    reason:
+      sickCount > 0
+        ? `Qwen 2.5 aprobó "${petition.title}" priorizando atender a ${sickCount} enfermo(s).`
+        : homelessCount > 0
+          ? `Qwen 2.5 aprobó "${petition.title}" para respaldar a ${homelessCount} aldeano(s) sin vivienda.`
+          : `Qwen 2.5 aprobó "${petition.title}" para sostener el progreso y bienestar de la aldea.`,
+  };
+}
+
+export function resolvePetition(
+  state: SimulationState,
+  wasHeard: boolean,
+  responder: 'Jugador' | 'Qwen 2.5' = 'Jugador'
+): string {
   const petition = state.pendingPetition;
   if (!petition) return 'No había ninguna petición pendiente.';
 
@@ -2192,8 +2689,10 @@ export function resolvePetition(state: SimulationState, wasHeard: boolean): stri
     agent.health = clamp(agent.health + healthDelta, 1, 100);
     agent.emotion = deriveAgentEmotion(agent, state.weather);
     agent.thought = positiveImpact
-      ? 'La Intervención Divina tomó la decisión justa para nuestra aldea.'
-      : 'La decisión divina afectó el ánimo y bienestar de la aldea.';
+      ? responder === 'Qwen 2.5'
+        ? 'Qwen 2.5 respondió con criterio y protegió nuestra aldea.'
+        : 'La Intervención Divina tomó la decisión justa para nuestra aldea.'
+      : 'La decisión tomada afectó el ánimo y bienestar de la aldea.';
   }
 
   state.pendingPetition = null;
@@ -2204,11 +2703,35 @@ export function resolvePetition(state: SimulationState, wasHeard: boolean): stri
   }
 
   const label = wasHeard ? 'Fue Escuchado' : 'No fue Escuchado';
-  const msg = `Intervención Divina (${label} · "${petition.title}"): impacto ${
+  const prefix = responder === 'Qwen 2.5' ? 'Qwen 2.5 (Qwen Responde)' : 'Intervención Divina';
+  const msg = `${prefix} (${label} · "${petition.title}"): impacto ${
     positiveImpact ? 'positivo' : 'negativo'
   } en ánimo y salud.`;
   addLog(state, msg, positiveImpact ? 'emerald' : 'rose');
   return msg;
+}
+
+export function resolvePetitionWithQwen(state: SimulationState): string {
+  const petition = state.pendingPetition;
+  if (!petition) return 'No había ninguna petición pendiente.';
+
+  const decision = decidePetitionByQwen(state, petition);
+  const result = resolvePetition(state, decision.wasHeard, 'Qwen 2.5');
+
+  state.qwenMessages.push({
+    id: state.nextId++,
+    role: 'qwen',
+    text: decision.reason,
+    appliedRules: [
+      `Representante: ${petition.representativeName}`,
+      `Respuesta automática: ${decision.wasHeard ? 'Fue Escuchado' : 'No fue Escuchado'}`,
+    ],
+    source: state.ollama.enabled ? 'ollama' : 'local',
+  });
+  if (state.qwenMessages.length > 35) {
+    state.qwenMessages = state.qwenMessages.slice(-35);
+  }
+  return result;
 }
 
 export function spawnFire(
@@ -2267,6 +2790,99 @@ export function triggerLightningStorm(state: SimulationState): FireHazard | null
   return spawnFire(state, picked.x, picked.y, 'Rayo de tormenta eléctrica', picked.kind, picked.id);
 }
 
+export function cancelActiveConstruction(
+  state: SimulationState,
+  agent: Agent,
+  reason = 'cancelada',
+  agentDied = false
+): ResourceCostMap {
+  const ac = agent.activeConstruction;
+  if (!ac) return {};
+
+  const progress = clamp(ac.elapsed / Math.max(1, ac.totalDuration), 0, 1);
+  const refunded: ResourceCostMap = {};
+  const depots = getOperationalDepots(state);
+  const targetDepot = depots[0] ?? state.specialBuildings.find((b) => b.type === 'general_depot') ?? null;
+
+  for (const [rawKey, totalQty] of Object.entries(ac.reservedMaterials)) {
+    const key = rawKey as keyof ResourceInventory;
+    const qty = totalQty ?? 0;
+    if (qty <= 0) continue;
+    const consumedByProgress = Math.floor(qty * progress);
+    let toRefund = Math.max(0, qty - consumedByProgress);
+    if (toRefund <= 0) continue;
+
+    refunded[key] = toRefund;
+    const depotShare = Math.min(toRefund, ac.fromDepot[key] ?? 0);
+    if (depotShare > 0) {
+      if (targetDepot) {
+        targetDepot.storage[key] += depotShare;
+      } else if (!agentDied) {
+        agent.inv[key] += depotShare;
+      }
+      toRefund -= depotShare;
+    }
+
+    if (toRefund > 0) {
+      if (!agentDied) {
+        agent.inv[key] += toRefund;
+      } else if (targetDepot) {
+        targetDepot.storage[key] += toRefund;
+      }
+    }
+  }
+
+  recordResourceOperation(state, {
+    actorName: agent.name,
+    targetName: ac.specialType ? SPECIAL_BUILDING_LABELS[ac.specialType].label : ac.kind,
+    operationType: 'cancelacion',
+    materials: refunded,
+    source: `Avance ${Math.round(progress * 100)}%`,
+    result:
+      Object.keys(refunded).length > 0
+        ? `Reembolso proporcional (${reason})`
+        : `Sin reembolso (${reason})`,
+  });
+
+  if (Object.keys(refunded).length > 0) {
+    addLog(
+      state,
+      `${agent.name} canceló obra (${reason}, ${Math.round(progress * 100)}%): devuelto ${formatResourceCost(refunded)}.`,
+      'amber'
+    );
+  }
+
+  agent.activeConstruction = null;
+  if (
+    agent.taskType === 'build_house' ||
+    agent.taskType === 'upgrade_house' ||
+    agent.taskType === 'build_plaza' ||
+    agent.taskType === 'build_bridge' ||
+    agent.taskType === 'plant_farm' ||
+    agent.taskType === 'build_special'
+  ) {
+    agent.taskType = 'idle';
+    agent.taskTimer = 0;
+    agent.activity = getConciseTaskLabel('idle');
+  }
+
+  return refunded;
+}
+
+export function setAgentJob(
+  state: SimulationState,
+  agent: Agent,
+  newJob: JobType,
+  reason = 'reasignación'
+): void {
+  if (agent.job === newJob) return;
+  if (agent.job === 'Constructor' && newJob !== 'Constructor' && agent.activeConstruction) {
+    cancelActiveConstruction(state, agent, `cambio de oficio a ${newJob} (${reason})`);
+  }
+  agent.job = newJob;
+  syncSpecialBuildingStaff(state);
+}
+
 export function enforceLawViolation(
   state: SimulationState,
   agent: Agent,
@@ -2276,6 +2892,10 @@ export function enforceLawViolation(
   const hasPolice = isBuildingOperational(state, 'police_station');
   const prison = state.specialBuildings.find((b) => b.type === 'prison' && b.isOperational);
   if (!hasPolice || !prison) return false;
+
+  if (agent.activeConstruction) {
+    cancelActiveConstruction(state, agent, 'detención policial');
+  }
 
   agent.jailedDays = 2;
   agent.x = prison.x + (Math.random() - 0.5) * 16;
@@ -2566,6 +3186,9 @@ export function advanceDayAging(
 
     if (agent.health <= 0) {
       diedOfOldAge += 1;
+      if (agent.activeConstruction) {
+        cancelActiveConstruction(state, agent, 'fallecimiento', true);
+      }
       transferInheritance(state, agent);
       const cause = agent.illness ? `por ${agent.illness.name}` : `a los ${agent.ageYears} años`;
       addLog(state, `${agent.name} falleció ${cause}.`, 'rose');
@@ -2797,6 +3420,9 @@ export function killAgent(state: SimulationState, agentId: number): string | nul
   const target = state.agents.find((a) => a.id === agentId);
   if (!target) return null;
 
+  if (target.activeConstruction) {
+    cancelActiveConstruction(state, target, 'muerte por intervención', true);
+  }
   transferInheritance(state, target);
 
   if (target.partnerId !== null) {
@@ -3074,6 +3700,11 @@ export function createPlaza(
     y: spot.y,
     builderName,
     builtDay: state.day,
+    durability: 100,
+    unpaidMaintenanceDays: 0,
+    maintenanceDebtCount: 0,
+    maintenanceStatus: 'ok' as MaintenanceStatus,
+    lastMaintenanceDay: state.day,
   };
   state.plaza = plaza;
   return plaza;
@@ -3094,6 +3725,10 @@ export function createBridge(
     builderName,
     builtDay: state.day,
     durability: 100,
+    unpaidMaintenanceDays: 0,
+    maintenanceDebtCount: 0,
+    maintenanceStatus: 'ok' as MaintenanceStatus,
+    lastMaintenanceDay: state.day,
   };
   state.bridge = bridge;
   return bridge;
@@ -3160,6 +3795,10 @@ export function createHouseNearCenter(
     capacity,
     comfortBonus: 8 * levelBySkill + (size === 'large' ? 8 : size === 'medium' ? 4 : 0),
     durability: 100,
+    unpaidMaintenanceDays: 0,
+    maintenanceDebtCount: 0,
+    maintenanceStatus: 'ok',
+    lastMaintenanceDay: state.day,
     builderName,
     storage: createEmptyHouseStorage(1),
   };
@@ -3177,25 +3816,63 @@ export function createHouseNearCenter(
   return house;
 }
 
-export function upgradeLowestHouse(state: SimulationState, constructionSkillPct = 20): House | null {
+export function upgradeLowestHouse(
+  state: SimulationState,
+  constructionSkillPct = 20,
+  targetHouseId?: number
+): House | null {
   const maxAllowed: 1 | 2 | 3 | 4 =
     constructionSkillPct >= 75
       ? 4
       : (Math.max(ERA_METADATA[state.era].maxHouseLevel, constructionSkillPct >= 45 ? 3 : 2) as 1 | 2 | 3 | 4);
-  const candidates = state.houses.filter((h) => h.level < maxAllowed).sort((a, b) => a.level - b.level);
+  const candidates = (
+    targetHouseId !== undefined
+      ? state.houses.filter((h) => h.id === targetHouseId && h.level < maxAllowed)
+      : state.houses.filter((h) => h.level < maxAllowed)
+  ).sort((a, b) => a.level - b.level);
   const target = candidates[0];
   if (!target) return null;
   target.level = (target.level + 1) as 1 | 2 | 3 | 4;
   target.comfortBonus += 10;
   target.durability = 100;
-  // Si sube de nivel y es chica, puede ampliarse a mediana (cap 6) o mediana -> grande (cap 8)
-  if (target.size === 'small' && target.level >= 3) {
-    target.size = 'medium';
-    target.capacity = HOUSE_SIZE_CAPACITIES.medium;
-  } else if (target.size === 'medium' && target.level === 4) {
-    target.size = 'large';
-    target.capacity = HOUSE_SIZE_CAPACITIES.large;
+  target.unpaidMaintenanceDays = 0;
+  target.maintenanceDebtCount = 0;
+  target.maintenanceStatus = 'ok';
+  target.lastMaintenanceDay = state.day;
+  return target;
+}
+
+export function getSpecialBuildingMaxLevelByTech(state: SimulationState, constructionSkillPct = 20): 1 | 2 | 3 {
+  if (state.era === 'wood' || state.era === 'iron' || state.era === 'civilization' || state.knowledge >= 85 || constructionSkillPct >= 65) {
+    return 3;
   }
+  if (state.era !== 'primitive' || state.knowledge >= 30 || constructionSkillPct >= 35) {
+    return 2;
+  }
+  return 1;
+}
+
+export function upgradeSpecialBuilding(
+  state: SimulationState,
+  typeOrId: SpecialBuildingType | number,
+  constructionSkillPct = 20
+): SpecialBuilding | null {
+  const maxAllowed = getSpecialBuildingMaxLevelByTech(state, constructionSkillPct);
+  const target =
+    typeof typeOrId === 'number'
+      ? state.specialBuildings.find((b) => b.id === typeOrId)
+      : state.specialBuildings
+          .filter((b) => b.type === typeOrId && b.level < 3)
+          .sort((a, b) => a.level - b.level)[0];
+  if (!target || target.level >= 3 || target.level >= maxAllowed) return null;
+  target.level = Math.min(3, target.level + 1);
+  target.durability = 100;
+  target.unpaidMaintenanceDays = 0;
+  target.maintenanceDebtCount = 0;
+  target.maintenanceStatus = 'ok';
+  target.lastMaintenanceDay = state.day;
+  target.efficiencyMultiplier = 1;
+  syncSpecialBuildingStaff(state);
   return target;
 }
 
@@ -3205,33 +3882,28 @@ export function createSpecialBuilding(
   builderName: string,
   anchorX?: number,
   anchorY?: number,
-  constructionSkillPct = 20,
+  _constructionSkillPct = 20,
   allowMultiple = true
 ): SpecialBuilding | null {
+  const spec = SPECIAL_BUILDING_COSTS[type];
   const sameType = state.specialBuildings.filter((b) => b.type === type);
-  const isCivicUnique = type === 'town_hall' || type === 'bank' || type === 'prison';
-  const candidate = findOperatorCandidateForBuilding(state, type);
-
-  if (sameType.length > 0 && (isCivicUnique || !allowMultiple || sameType.length >= 3 || !candidate)) {
-    const existing = sameType[0];
-    existing.level = Math.min(3, existing.level + 1);
-    existing.durability = 100;
-    syncSpecialBuildingStaff(state);
-    return existing;
+  const maxCount = allowMultiple ? spec.maxCount : 1;
+  if (sameType.length >= maxCount) {
+    return null;
   }
 
+  const candidate = findOperatorCandidateForBuilding(state, type);
   if (!candidate) {
     return null;
   }
 
   const meta = SPECIAL_BUILDING_LABELS[type];
   const spot = chooseQwenBuildSpot(state, type === 'dock' ? 'dock' : 'special', 'south', anchorX, anchorY);
-  const initialLevel = constructionSkillPct >= 65 ? 2 : 1;
 
   // Asignar oficio al operario encontrado
   const requiredJob = SPECIAL_BUILDING_STAFF_JOBS[type][0];
   if (!SPECIAL_BUILDING_STAFF_JOBS[type].includes(candidate.job)) {
-    candidate.job = requiredJob;
+    setAgentJob(state, candidate, requiredJob, `asignado a ${meta.label}`);
   }
 
   const sameCount = sameType.length + 1;
@@ -3242,12 +3914,17 @@ export function createSpecialBuilding(
     category: meta.category,
     x: spot.x,
     y: spot.y,
-    level: initialLevel,
+    level: 1,
     builderName,
     ownerId: candidate.id,
     forSale: false,
     price: meta.basePrice,
     durability: 100,
+    unpaidMaintenanceDays: 0,
+    maintenanceDebtCount: 0,
+    maintenanceStatus: 'ok',
+    lastMaintenanceDay: state.day,
+    efficiencyMultiplier: 1,
     staffIds: [candidate.id],
     isOperational: true,
     allowedStorage: [...SPECIAL_BUILDING_ALLOWED_STORAGE[type]],
@@ -3263,7 +3940,8 @@ export function createFarmPlot(
   state: SimulationState,
   zone: 'south' | 'north' = 'south',
   anchorX?: number,
-  anchorY?: number
+  anchorY?: number,
+  forcedSize?: FarmPlot['size']
 ): FarmPlot {
   const id = state.nextId++;
   const crops = ['Trigo', 'Maíz', 'Hortalizas'];
@@ -3273,12 +3951,364 @@ export function createFarmPlot(
     id,
     x: spot.x,
     y: spot.y,
-    size: sizes[(id + state.farms.length) % sizes.length],
+    size: forcedSize ?? sizes[(id + state.farms.length) % sizes.length],
     growth: 25,
     cropName: crops[id % crops.length],
+    durability: 100,
+    unpaidMaintenanceDays: 0,
+    maintenanceDebtCount: 0,
+    maintenanceStatus: 'ok',
+    lastMaintenanceDay: state.day,
   };
   state.farms.push(plot);
   return plot;
+}
+
+export interface ConstructionStartResult {
+  ok: boolean;
+  reason?: string;
+  construction?: ActiveConstruction;
+}
+
+export function validateAndComputeConstructionPlan(
+  state: SimulationState,
+  builder: Agent | null,
+  kind: ActiveConstruction['kind'],
+  options?: {
+    houseSize?: House['size'];
+    farmSize?: FarmPlot['size'];
+    specialType?: SpecialBuildingType;
+    targetId?: number;
+    zone?: 'south' | 'north';
+    anchorX?: number;
+    anchorY?: number;
+  }
+): {
+  ok: boolean;
+  reason?: string;
+  cost: ResourceCostMap;
+  applyCarpentryDiscount: boolean;
+  resolvedSize?: House['size'] | FarmPlot['size'];
+  spot?: { x: number; y: number };
+} {
+  if (!builder || builder.isChild || builder.jailedDays > 0 || builder.job !== 'Constructor') {
+    return {
+      ok: false,
+      reason: 'Se requiere un aldeano adulto con oficio Constructor disponible.',
+      cost: {},
+      applyCarpentryDiscount: false,
+    };
+  }
+  if (builder.activeConstruction) {
+    return {
+      ok: false,
+      reason: `${builder.name} ya tiene una obra en curso.`,
+      cost: {},
+      applyCarpentryDiscount: false,
+    };
+  }
+
+  let cost: ResourceCostMap = {};
+  let applyCarpentryDiscount = false;
+  let resolvedSize: House['size'] | FarmPlot['size'] | undefined;
+  let spot: { x: number; y: number } = { x: builder.x, y: builder.y };
+
+  if (kind === 'house') {
+    const size: House['size'] =
+      options?.houseSize ??
+      (builder.constructionKnowledge >= 65
+        ? 'large'
+        : builder.constructionKnowledge >= 35
+          ? 'medium'
+          : 'small');
+    resolvedSize = size;
+    const baseCost = getHouseBuildCost(size, false);
+    applyCarpentryDiscount = canApplyCarpentryHousingDiscount(state, baseCost);
+    cost = getHouseBuildCost(size, applyCarpentryDiscount);
+    const zone = options?.zone === 'north' && isBridgePassable(state) ? 'north' : 'south';
+    spot = chooseQwenBuildSpot(state, 'house', zone, options?.anchorX, options?.anchorY);
+  } else if (kind === 'upgrade_house') {
+    const maxAllowed: 1 | 2 | 3 | 4 =
+      builder.constructionKnowledge >= 75
+        ? 4
+        : (Math.max(
+            ERA_METADATA[state.era].maxHouseLevel,
+            builder.constructionKnowledge >= 45 ? 3 : 2
+          ) as 1 | 2 | 3 | 4);
+    const target =
+      options?.targetId !== undefined
+        ? state.houses.find((h) => h.id === options.targetId && h.level < maxAllowed)
+        : state.houses.filter((h) => h.level < maxAllowed).sort((a, b) => a.level - b.level)[0];
+    if (!target) {
+      return {
+        ok: false,
+        reason: 'No hay vivienda elegible para mejorar en la era/saber actual.',
+        cost: {},
+        applyCarpentryDiscount: false,
+      };
+    }
+    const nextLv = (target.level + 1) as 2 | 3 | 4;
+    const baseCost = getHouseUpgradeCost(target.size, nextLv, false);
+    applyCarpentryDiscount = canApplyCarpentryHousingDiscount(state, baseCost);
+    cost = getHouseUpgradeCost(target.size, nextLv, applyCarpentryDiscount);
+    spot = { x: target.x, y: target.y };
+  } else if (kind === 'plaza') {
+    if (state.plaza) {
+      return { ok: false, reason: 'La Plaza Central ya existe (única).', cost: {}, applyCarpentryDiscount: false };
+    }
+    cost = { ...PLAZA_COSTS.build };
+    spot = chooseQwenBuildSpot(state, 'plaza', 'south', options?.anchorX, options?.anchorY);
+  } else if (kind === 'bridge') {
+    if (state.bridge) {
+      return { ok: false, reason: 'El Puente Fluvial ya existe (único).', cost: {}, applyCarpentryDiscount: false };
+    }
+    cost = { ...BRIDGE_COSTS.build };
+    spot = { x: options?.anchorX ?? BRIDGE_CENTER_X, y: RIVER_BOTTOM_Y + 26 };
+  } else if (kind === 'farm') {
+    const farmSize: FarmPlot['size'] = options?.farmSize ?? 'small';
+    resolvedSize = farmSize;
+    cost = getFarmCost(farmSize).build;
+    const zone = options?.zone === 'north' && isBridgePassable(state) ? 'north' : 'south';
+    spot = chooseQwenBuildSpot(state, 'farm', zone, options?.anchorX, options?.anchorY);
+  } else if (kind === 'special') {
+    const st = options?.specialType;
+    if (!st) {
+      return { ok: false, reason: 'Tipo de edificio especial no especificado.', cost: {}, applyCarpentryDiscount: false };
+    }
+    const spec = SPECIAL_BUILDING_COSTS[st];
+    const existingCount = state.specialBuildings.filter((b) => b.type === st).length;
+    if (existingCount >= spec.maxCount) {
+      return {
+        ok: false,
+        reason: spec.unique
+          ? `${SPECIAL_BUILDING_LABELS[st].label} es único y ya fue construido.`
+          : `Límite máximo (${spec.maxCount}) alcanzado para ${SPECIAL_BUILDING_LABELS[st].label}.`,
+        cost: {},
+        applyCarpentryDiscount: false,
+      };
+    }
+    if (!hasAvailableOperatorForBuilding(state, st)) {
+      return {
+        ok: false,
+        reason: `No hay operario disponible para ${SPECIAL_BUILDING_LABELS[st].label}.`,
+        cost: {},
+        applyCarpentryDiscount: false,
+      };
+    }
+    cost = getSpecialBuildingCost(st, 1);
+    spot = chooseQwenBuildSpot(state, st === 'dock' ? 'dock' : 'special', 'south', options?.anchorX, options?.anchorY);
+  } else if (kind === 'upgrade_special') {
+    const st = options?.specialType;
+    const maxTechLv = getSpecialBuildingMaxLevelByTech(state, builder.constructionKnowledge);
+    const target =
+      options?.targetId !== undefined
+        ? state.specialBuildings.find((b) => b.id === options.targetId)
+        : st
+          ? state.specialBuildings
+              .filter((b) => b.type === st && b.level < 3)
+              .sort((a, b) => a.level - b.level)[0]
+          : undefined;
+    if (!target) {
+      return { ok: false, reason: 'No hay edificio especial construible/mejorable.', cost: {}, applyCarpentryDiscount: false };
+    }
+    if (target.level >= 3 || target.level >= maxTechLv) {
+      return {
+        ok: false,
+        reason: `${target.name} alcanzó el nivel máximo permitido por la tecnología actual (N${target.level}).`,
+        cost: {},
+        applyCarpentryDiscount: false,
+      };
+    }
+    const nextLv = (target.level + 1) as 2 | 3;
+    cost = getSpecialBuildingCost(target.type, nextLv);
+    spot = { x: target.x, y: target.y };
+  }
+
+  return { ok: true, cost, applyCarpentryDiscount, resolvedSize, spot };
+}
+
+export function startConstructionProject(
+  state: SimulationState,
+  builder: Agent | null,
+  kind: ActiveConstruction['kind'],
+  options?: {
+    houseSize?: House['size'];
+    farmSize?: FarmPlot['size'];
+    specialType?: SpecialBuildingType;
+    targetId?: number;
+    zone?: 'south' | 'north';
+    anchorX?: number;
+    anchorY?: number;
+    duration?: number;
+  }
+): ConstructionStartResult {
+  const plan = validateAndComputeConstructionPlan(state, builder, kind, options);
+  if (!plan.ok || !builder) {
+    return { ok: false, reason: plan.reason };
+  }
+
+  const depots = getOperationalDepots(state);
+  for (const [rawKey, rawNeed] of Object.entries(plan.cost)) {
+    const key = rawKey as keyof ResourceInventory;
+    const need = rawNeed ?? 0;
+    if (need <= 0) continue;
+    const avail = builder.inv[key] + depots.reduce((acc, d) => acc + d.storage[key], 0);
+    if (avail < need) {
+      return {
+        ok: false,
+        reason: `Faltan materiales para iniciar (${formatResourceCost(plan.cost)}).`,
+      };
+    }
+  }
+
+  const targetName =
+    kind === 'plaza'
+      ? 'Plaza Central'
+      : kind === 'bridge'
+        ? 'Puente Fluvial'
+        : kind === 'special' && options?.specialType
+          ? SPECIAL_BUILDING_LABELS[options.specialType].label
+          : kind === 'upgrade_special' && options?.specialType
+            ? `Mejora ${SPECIAL_BUILDING_LABELS[options.specialType].label}`
+            : kind === 'farm'
+              ? 'Parcela de Cultivo'
+              : kind === 'upgrade_house'
+                ? 'Mejora de Vivienda'
+                : 'Vivienda';
+
+  const opType: ConstructionOperationType =
+    kind === 'upgrade_house' || kind === 'upgrade_special' ? 'mejora' : 'construccion';
+  const reservation = reserveConstructionMaterials(
+    state,
+    builder,
+    plan.cost,
+    true,
+    targetName,
+    opType
+  );
+  if (!reservation.ok) {
+    return {
+      ok: false,
+      reason: `Faltan materiales para iniciar (${formatResourceCost(plan.cost)}).`,
+    };
+  }
+
+  let carpentryWoodConsumed = 0;
+  if (plan.applyCarpentryDiscount && consumeCarpentryHousingDiscount(state, builder.name, targetName)) {
+    carpentryWoodConsumed = 1;
+  }
+
+  const ac: ActiveConstruction = {
+    id: state.nextId++,
+    kind,
+    targetId: options?.targetId,
+    specialType: options?.specialType,
+    houseSize: (kind === 'house' ? (plan.resolvedSize as House['size']) : options?.houseSize),
+    farmSize: (kind === 'farm' ? (plan.resolvedSize as FarmPlot['size']) : options?.farmSize),
+    zone: options?.zone,
+    x: plan.spot?.x ?? builder.x,
+    y: plan.spot?.y ?? builder.y,
+    totalDuration: options?.duration ?? 36,
+    elapsed: 0,
+    reservedMaterials: { ...plan.cost },
+    fromPersonal: reservation.fromPersonal,
+    fromDepot: reservation.fromDepot,
+    carpentryWoodConsumed,
+  };
+  builder.activeConstruction = ac;
+  return { ok: true, construction: ac };
+}
+
+export function completeActiveConstruction(state: SimulationState, builder: Agent): boolean {
+  const ac = builder.activeConstruction;
+  if (!ac) return false;
+  builder.activeConstruction = null;
+
+  let completed = false;
+  if (ac.kind === 'house') {
+    const zone = ac.zone === 'north' && isBridgePassable(state) ? 'north' : 'south';
+    const h = createHouseNearCenter(
+      state,
+      builder.name,
+      zone,
+      ac.houseSize ?? 'small',
+      ac.x,
+      ac.y,
+      builder.constructionKnowledge
+    );
+    builder.constructionKnowledge = clamp(builder.constructionKnowledge + 5, 0, 100);
+    advanceJobMastery(builder, 'Constructor', 4);
+    state.knowledge += 6;
+    addLog(
+      state,
+      `${builder.name} completó ${h.name} (${HOUSE_SIZE_LABELS[h.size]} · ${HOUSE_LEVEL_LABELS[h.level]}).`,
+      'emerald'
+    );
+    completed = true;
+  } else if (ac.kind === 'upgrade_house') {
+    const h = upgradeLowestHouse(state, builder.constructionKnowledge, ac.targetId);
+    if (h) {
+      builder.constructionKnowledge = clamp(builder.constructionKnowledge + 4, 0, 100);
+      advanceJobMastery(builder, 'Constructor', 4);
+      state.knowledge += 5;
+      addLog(state, `${builder.name} completó mejora de ${h.name} a ${HOUSE_LEVEL_LABELS[h.level]}.`, 'sky');
+      completed = true;
+    }
+  } else if (ac.kind === 'plaza' && !state.plaza) {
+    const p = createPlaza(state, builder.name, ac.x, ac.y);
+    builder.constructionKnowledge = clamp(builder.constructionKnowledge + 8, 0, 100);
+    advanceJobMastery(builder, 'Constructor', 6);
+    state.knowledge += 14;
+    addLog(state, `${builder.name} completó la Plaza Central en (${p.x}, ${p.y}).`, 'sky');
+    completed = true;
+  } else if (ac.kind === 'bridge' && !state.bridge) {
+    const b = createBridge(state, builder.name, ac.x);
+    builder.constructionKnowledge = clamp(builder.constructionKnowledge + 8, 0, 100);
+    advanceJobMastery(builder, 'Constructor', 6);
+    state.knowledge += 14;
+    addLog(state, `${builder.name} completó el Puente Fluvial en X=${b.x}.`, 'sky');
+    completed = true;
+  } else if (ac.kind === 'farm') {
+    const zone = ac.zone === 'north' && isBridgePassable(state) ? 'north' : 'south';
+    const farm = createFarmPlot(state, zone, ac.x, ac.y, ac.farmSize ?? 'small');
+    builder.constructionKnowledge = clamp(builder.constructionKnowledge + 3, 0, 100);
+    advanceJobMastery(builder, 'Constructor', 3);
+    state.knowledge += 3;
+    addLog(state, `${builder.name} completó parcela de cultivo ${farm.cropName}.`, 'emerald');
+    completed = true;
+  } else if (ac.kind === 'special' && ac.specialType) {
+    const sp = createSpecialBuilding(
+      state,
+      ac.specialType,
+      builder.name,
+      ac.x,
+      ac.y,
+      builder.constructionKnowledge
+    );
+    if (sp) {
+      builder.constructionKnowledge = clamp(builder.constructionKnowledge + 7, 0, 100);
+      advanceJobMastery(builder, 'Constructor', 5);
+      state.knowledge += 14;
+      addLog(state, `${builder.name} completó ${sp.name} (N${sp.level}).`, 'emerald');
+      completed = true;
+    }
+  } else if (ac.kind === 'upgrade_special' && (ac.targetId !== undefined || ac.specialType)) {
+    const sp = upgradeSpecialBuilding(
+      state,
+      ac.targetId ?? ac.specialType!,
+      builder.constructionKnowledge
+    );
+    if (sp) {
+      builder.constructionKnowledge = clamp(builder.constructionKnowledge + 6, 0, 100);
+      advanceJobMastery(builder, 'Constructor', 5);
+      state.knowledge += 10;
+      addLog(state, `${builder.name} mejoró ${sp.name} a Nivel ${sp.level}.`, 'sky');
+      completed = true;
+    }
+  }
+
+  state.era = computeEra(state.knowledge, state.houses);
+  return completed;
 }
 
 export function killCropPlotAt(state: SimulationState, x: number, y: number): FarmPlot | null {
@@ -3407,20 +4437,62 @@ export function tameWildAnimal(state: SimulationState, animal: Animal, tamer: Ag
   return true;
 }
 
-export function addRoadTile(state: SimulationState, x: number, y: number): RoadTile | null {
+export function addRoadTile(
+  state: SimulationState,
+  x: number,
+  y: number,
+  roadType: RoadType = state.selectedRoadType ?? 'dirt',
+  withLamp: boolean = state.selectedRoadLamp ?? false,
+  payer?: Agent | null
+): RoadTile | null {
   const gx = clamp(Math.round(x / ROAD_GRID_SIZE) * ROAD_GRID_SIZE, 24, CANVAS_WIDTH - 24);
   const gy = clamp(Math.round(y / ROAD_GRID_SIZE) * ROAD_GRID_SIZE, 24, CANVAS_HEIGHT - 24);
-  const bridgeX = state.bridge?.x ?? null;
+  const bridgeX = isBridgePassable(state) ? state.bridge!.x : null;
   if (isPointInRiverWater(gx, gy, bridgeX)) return null;
   const exists = state.roads.some((r) => r.x === gx && r.y === gy);
   if (exists) return null;
 
-  const tile: RoadTile = { id: state.nextId++, x: gx, y: gy, lit: true };
+  const cost = getRoadTileCost(roadType, withLamp);
+  const effectivePayer =
+    payer !== undefined
+      ? payer
+      : state.agents.find((a) => !a.isChild && a.jailedDays <= 0 && a.job === 'Constructor') ?? null;
+
+  const paid = consumeConstructionResources(
+    state,
+    effectivePayer,
+    cost,
+    true,
+    `Camino ${roadType}${withLamp ? ' + Farol' : ''}`,
+    'camino'
+  );
+  if (!paid) {
+    return null;
+  }
+
+  const tile: RoadTile = {
+    id: state.nextId++,
+    x: gx,
+    y: gy,
+    roadType,
+    hasLamp: withLamp,
+    lit: withLamp,
+    durability: 100,
+  };
   state.roads.push(tile);
   return tile;
 }
 
-function addRoadLine(state: SimulationState, x1: number, y1: number, x2: number, y2: number): number {
+function addRoadLine(
+  state: SimulationState,
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  roadType: RoadType,
+  withLamp: boolean,
+  payer: Agent | null
+): number {
   let added = 0;
   const steps = Math.max(Math.abs(x2 - x1), Math.abs(y2 - y1)) / ROAD_GRID_SIZE;
   const n = Math.max(1, Math.ceil(steps));
@@ -3428,34 +4500,56 @@ function addRoadLine(state: SimulationState, x1: number, y1: number, x2: number,
     const t = i / n;
     const rx = x1 + (x2 - x1) * t;
     const ry = y1 + (y2 - y1) * t;
-    if (addRoadTile(state, rx, ry)) added++;
+    const tile = addRoadTile(state, rx, ry, roadType, withLamp, payer);
+    if (tile) added++;
   }
   return added;
 }
 
-export function buildBaseRoads(state: SimulationState): number {
+export function buildBaseRoads(
+  state: SimulationState,
+  roadType: RoadType = state.selectedRoadType ?? 'dirt',
+  withLamp: boolean = state.selectedRoadLamp ?? false,
+  payer?: Agent | null
+): number {
+  const effectivePayer =
+    payer !== undefined
+      ? payer
+      : state.agents.find((a) => !a.isChild && a.jailedDays <= 0 && a.job === 'Constructor') ?? null;
+
   let added = 0;
   const hubX = state.plaza ? state.plaza.x : WORLD_CENTER_X;
   const hubY = state.plaza ? state.plaza.y : SOUTH_CENTER_Y;
+  const bridgePassable = isBridgePassable(state);
 
-  if (state.bridge) {
-    added += addRoadLine(state, hubX, hubY, state.bridge.x, RIVER_BOTTOM_Y + 18);
-    added += addRoadLine(state, state.bridge.x, RIVER_BOTTOM_Y + 18, state.bridge.x, NORTH_CENTER_Y);
-    added += addRoadLine(state, state.bridge.x - 160, NORTH_CENTER_Y, state.bridge.x + 160, NORTH_CENTER_Y);
+  if (state.bridge && bridgePassable) {
+    added += addRoadLine(state, hubX, hubY, state.bridge.x, RIVER_BOTTOM_Y + 18, roadType, withLamp, effectivePayer);
+    added += addRoadLine(state, state.bridge.x, RIVER_BOTTOM_Y + 18, state.bridge.x, NORTH_CENTER_Y, roadType, withLamp, effectivePayer);
+    added += addRoadLine(state, state.bridge.x - 160, NORTH_CENTER_Y, state.bridge.x + 160, NORTH_CENTER_Y, roadType, withLamp, effectivePayer);
   }
 
   for (const house of state.houses) {
     if (house.zone === 'south') {
-      added += addRoadLine(state, hubX, hubY, house.x, house.y + 12);
-    } else if (state.bridge) {
-      added += addRoadLine(state, state.bridge.x, NORTH_CENTER_Y, house.x, house.y + 12);
+      added += addRoadLine(state, hubX, hubY, house.x, house.y + 12, roadType, withLamp, effectivePayer);
+    } else if (state.bridge && bridgePassable) {
+      added += addRoadLine(state, state.bridge.x, NORTH_CENTER_Y, house.x, house.y + 12, roadType, withLamp, effectivePayer);
     }
   }
   for (const b of state.specialBuildings) {
-    added += addRoadLine(state, hubX, hubY, b.x, b.y + 12);
+    added += addRoadLine(state, hubX, hubY, b.x, b.y + 12, roadType, withLamp, effectivePayer);
   }
   if (added > 0) {
-    addLog(state, `Se trazaron ${added} tramos de camino por necesidad de tránsito.`, 'sky');
+    addLog(
+      state,
+      `Se trazaron ${added} tramos de camino (${roadType}${withLamp ? ' con farol' : ''}) pagando recursos reales.`,
+      'sky'
+    );
+  } else {
+    addLog(
+      state,
+      `No se pudieron trazar nuevos caminos: faltan materiales (${formatResourceCost(getRoadTileCost(roadType, withLamp))} por tramo) o no hay tramos nuevos.`,
+      'amber'
+    );
   }
   return added;
 }
@@ -3658,8 +4752,16 @@ export function interpretQwenDirective(
   }
 
   if (q.includes('camino') || q.includes('sendero') || q.includes('calle') || q.includes('ruta') || q.includes('alumbrad') || q.includes('farol')) {
-    actions.push({ type: 'ADD_ROADS' });
-    summaryParts.push('trazado de caminos iluminados');
+    const roadType: RoadType | undefined = q.includes('reforzad')
+      ? 'reinforced'
+      : q.includes('piedra')
+        ? 'stone'
+        : q.includes('tierra')
+          ? 'dirt'
+          : undefined;
+    const withLamp = q.includes('farol') || q.includes('ilumin') || q.includes('alumbrad') ? true : undefined;
+    actions.push({ type: 'ADD_ROADS', roadType, withLamp });
+    summaryParts.push('trazado de caminos con recursos reales');
   }
 
   if (q.includes('muelle') || (q.includes('pesc') && !q.includes('prohibir'))) {
@@ -3826,10 +4928,36 @@ export function interpretQwenDirective(
 
   const upgradeMatch = q.match(/(?:mejorar|mejora|mejoren|subir|ampliar)\s*(?:(\d+)\s*)?(?:casas?|viviendas?|refugios?)/);
   if (upgradeMatch || q.includes('mejorar') || q.includes('mejoren') || q.includes('subir nivel') || q.includes('ampliar')) {
-    const count = clamp(upgradeMatch && upgradeMatch[1] ? Number(upgradeMatch[1]) : 1, 1, 6);
-    actions.push({ type: 'UPGRADE_HOUSES', count });
-    actions.push({ type: 'SET_POLICIES', patch: { buildPriority: true } });
-    summaryParts.push(`mejora de ${count} casa(s)`);
+    const specialUpgradeMap: Array<[string, SpecialBuildingType]> = [
+      ['mercado', 'market'],
+      ['panader', 'bakery'],
+      ['carpinter', 'carpentry'],
+      ['forja', 'forge'],
+      ['herrer', 'forge'],
+      ['botic', 'apothecary'],
+      ['muelle', 'dock'],
+      ['banco', 'bank'],
+      ['hospital', 'infirmary'],
+      ['enfermer', 'infirmary'],
+      ['escuela', 'school'],
+      ['deposito', 'general_depot'],
+      ['depósito', 'general_depot'],
+      ['ayuntamiento', 'town_hall'],
+      ['comisaria', 'police_station'],
+      ['comisaría', 'police_station'],
+      ['carcel', 'prison'],
+      ['cárcel', 'prison'],
+    ];
+    const specialUpgrade = specialUpgradeMap.find(([kw]) => q.includes(kw));
+    if (specialUpgrade) {
+      actions.push({ type: 'UPGRADE_SPECIAL', buildingType: specialUpgrade[1] });
+      summaryParts.push(`mejora de ${SPECIAL_BUILDING_LABELS[specialUpgrade[1]].label}`);
+    } else {
+      const count = clamp(upgradeMatch && upgradeMatch[1] ? Number(upgradeMatch[1]) : 1, 1, 6);
+      actions.push({ type: 'UPGRADE_HOUSES', count });
+      actions.push({ type: 'SET_POLICIES', patch: { buildPriority: true } });
+      summaryParts.push(`mejora de ${count} casa(s)`);
+    }
   }
 
   if (!matchedName && (q.includes('trabajo') || q.includes('activo') || q.includes('oficio') || q.includes('productiv'))) {
@@ -3927,6 +5055,9 @@ export function applyQwenActions(
     return rank(a) - rank(b);
   });
 
+  const findConstructor = (): Agent | null =>
+    state.agents.find((a) => !a.isChild && a.jailedDays <= 0 && a.job === 'Constructor') ?? null;
+
   for (const action of orderedActions) {
     switch (action.type) {
       case 'PAUSE_RESOURCES': {
@@ -4008,8 +5139,20 @@ export function applyQwenActions(
         break;
       }
       case 'ADD_ROADS': {
-        const added = buildBaseRoads(state);
-        executed.push(added > 0 ? `+${added} tramos de camino` : 'Red de caminos al día');
+        const builder = findConstructor();
+        if (!builder) {
+          executed.push('Caminos pendientes: se requiere Constructor');
+          addLog(state, 'Se requiere al menos un aldeano Constructor con materiales para trazar caminos.', 'amber');
+          break;
+        }
+        const rType = action.roadType ?? state.selectedRoadType ?? 'dirt';
+        const rLamp = action.withLamp ?? state.selectedRoadLamp ?? false;
+        const added = buildBaseRoads(state, rType, rLamp, builder);
+        executed.push(
+          added > 0
+            ? `+${added} tramos de camino (${rType}${rLamp ? ' + farol' : ''})`
+            : `Faltan recursos (${formatResourceCost(getRoadTileCost(rType, rLamp))}/tramo) o red al día`
+        );
         break;
       }
       case 'SPAWN_ANIMAL': {
@@ -4032,7 +5175,7 @@ export function applyQwenActions(
         }
         const changes: string[] = [];
         if (action.job && !target.isChild) {
-          target.job = action.job;
+          setAgentJob(state, target, action.job, 'directiva Qwen 2.5');
           changes.push(`oficio ${action.job}`);
         }
         if (action.action === 'switch_partner') {
@@ -4082,18 +5225,26 @@ export function applyQwenActions(
       }
       case 'GENERATE_ECONOMY': {
         state.policies.economyFocus = true;
-        const builder = state.agents.find((a) => !a.isChild) ?? null;
+        const builder = findConstructor();
         const builtNames: string[] = [];
-        for (const ecoType of ['bank', 'market', 'bakery', 'general_depot'] as SpecialBuildingType[]) {
-          if (!state.specialBuildings.some((b) => b.type === ecoType) && hasAvailableOperatorForBuilding(state, ecoType)) {
-            if (consumeConstructionResources(state, builder, { wood: 3, stone: 2 })) {
+        for (const ecoType of ['general_depot', 'market', 'bakery', 'bank'] as SpecialBuildingType[]) {
+          const spec = SPECIAL_BUILDING_COSTS[ecoType];
+          const existingCount = state.specialBuildings.filter((b) => b.type === ecoType).length;
+          if (
+            existingCount < spec.maxCount &&
+            builder &&
+            hasAvailableOperatorForBuilding(state, ecoType)
+          ) {
+            const cost = getSpecialBuildingCost(ecoType, 1);
+            const label = SPECIAL_BUILDING_LABELS[ecoType].label;
+            if (consumeConstructionResources(state, builder, cost, true, label, 'construccion')) {
               const created = createSpecialBuilding(
                 state,
                 ecoType,
-                'Directiva Qwen 2.5',
+                builder.name,
                 undefined,
                 undefined,
-                builder?.constructionKnowledge ?? 25
+                builder.constructionKnowledge
               );
               if (created) {
                 builtInBatch.add(ecoType);
@@ -4102,36 +5253,31 @@ export function applyQwenActions(
             }
           }
         }
-        addPreciousMetalToReserve(state, 'gold', 2);
-        addPreciousMetalToReserve(state, 'silver', 3);
         let traders = 0;
-        let distributedCoins = 0;
         for (const agent of state.agents) {
           if (
             !agent.isChild &&
             (agent.job === 'Recolector' || agent.job === 'Aprendiz') &&
             traders < Math.max(3, Math.ceil(state.agents.length / 4))
           ) {
-            agent.job = traders === 0 ? 'Banquero' : traders === 1 ? 'Panadero' : 'Comerciante';
+            const nextJob: JobType = traders === 0 ? 'Banquero' : traders === 1 ? 'Panadero' : 'Comerciante';
+            setAgentJob(state, agent, nextJob, 'economía');
             traders++;
           }
-          const minted = mintBackedCoins(state, 6);
-          agent.coins += minted;
-          distributedCoins += minted;
           agent.taskTimer = 0;
-          agent.lastQwenDecision = `Qwen 2.5 activó comercio respaldado (+${minted} monedas).`;
-          agent.thought = 'Participo en el Banco y los comercios con respaldo en Oro y Plata.';
+          agent.lastQwenDecision = 'Qwen 2.5 activó prioridad comercial y oficios económicos.';
+          agent.thought = 'Impulsaremos la producción y el comercio con recursos reales.';
         }
         syncSpecialBuildingStaff(state);
-        state.knowledge += 12;
+        state.knowledge += 8;
         executed.push(
-          `${builtNames.length > 0 ? builtNames.join(' y ') : 'Economía respaldada'} · ${traders} puestos · +${distributedCoins} monedas`
+          `${builtNames.length > 0 ? builtNames.join(' y ') : 'Política económica activa'} · ${traders} oficios comerciales (sin emisión gratuita)`
         );
         addLog(
           state,
           builtNames.length > 0
-            ? `Qwen 2.5 activó la economía aldeana y levantó: ${builtNames.join(', ')}.`
-            : 'Qwen 2.5 activó política económica y oficios comerciales; falta madera/piedra para erigir más locales.',
+            ? `Qwen 2.5 activó la economía aldeana y levantó con recursos reales: ${builtNames.join(', ')}.`
+            : 'Qwen 2.5 activó política económica; se requieren recursos reales y metales minados para levantar locales y emitir monedas.',
           'amber'
         );
         break;
@@ -4143,9 +5289,25 @@ export function applyQwenActions(
           spawned = spawnSettlerFn(state, action.spawnCount);
         }
         if (shouldBuildHouse(state)) {
-          const builder = state.agents.find((a) => !a.isChild) ?? null;
-          if (consumeConstructionResources(state, builder, { wood: 3 })) {
-            createHouseNearCenter(state, 'Expansión Qwen 2.5', 'south', undefined, undefined, undefined, builder?.constructionKnowledge ?? 20);
+          const builder = findConstructor();
+          if (builder) {
+            const baseCost = getHouseBuildCost('small', false);
+            const disc = canApplyCarpentryHousingDiscount(state, baseCost);
+            const cost = getHouseBuildCost('small', disc);
+            if (
+              consumeConstructionResources(state, builder, cost, true, 'Vivienda expansión', 'construccion')
+            ) {
+              if (disc) consumeCarpentryHousingDiscount(state, builder.name, 'Vivienda expansión');
+              createHouseNearCenter(
+                state,
+                builder.name,
+                'south',
+                'small',
+                undefined,
+                undefined,
+                builder.constructionKnowledge
+              );
+            }
           }
         }
         for (const agent of state.agents) {
@@ -4166,16 +5328,22 @@ export function applyQwenActions(
           executed.push('Plaza ya construida');
           break;
         }
-        const builder = state.agents.find((a) => !a.isChild) ?? null;
-        if (!consumeConstructionResources(state, builder, { wood: 4, stone: 4 })) {
-          executed.push('Plaza pendiente: faltan recursos (4 madera + 4 piedra)');
-          addLog(state, 'Qwen 2.5 pospuso la Plaza: faltan 4 de madera y 4 de piedra en inventarios/baúles.', 'amber');
+        const builder = findConstructor();
+        if (!builder) {
+          executed.push('Plaza pendiente: se requiere un Constructor');
+          addLog(state, 'Qwen 2.5 pospuso la Plaza: falta un aldeano Constructor.', 'amber');
           break;
         }
-        const plaza = createPlaza(state, 'Directiva Qwen 2.5');
+        if (!consumeConstructionResources(state, builder, PLAZA_COSTS.build, true, 'Plaza Central', 'construccion')) {
+          const reqStr = formatResourceCost(PLAZA_COSTS.build);
+          executed.push(`Plaza pendiente: faltan recursos (${reqStr})`);
+          addLog(state, `Qwen 2.5 pospuso la Plaza Central: faltan ${reqStr} (solo personal/Depósito).`, 'amber');
+          break;
+        }
+        const plaza = createPlaza(state, builder.name);
         state.knowledge += 14;
         executed.push(`Plaza en (${plaza.x}, ${plaza.y})`);
-        addLog(state, `Qwen 2.5 decidió erigir la Plaza Central en (${plaza.x}, ${plaza.y}).`, 'sky');
+        addLog(state, `${builder.name} erigió la Plaza Central en (${plaza.x}, ${plaza.y}).`, 'sky');
         break;
       }
       case 'BUILD_BRIDGE': {
@@ -4183,16 +5351,22 @@ export function applyQwenActions(
           executed.push('Puente ya construido');
           break;
         }
-        const builder = state.agents.find((a) => !a.isChild) ?? null;
-        if (!consumeConstructionResources(state, builder, { wood: 4, stone: 2 })) {
-          executed.push('Puente pendiente: faltan recursos (4 madera + 2 piedra)');
-          addLog(state, 'Qwen 2.5 pospuso el Puente: faltan 4 de madera y 2 de piedra.', 'amber');
+        const builder = findConstructor();
+        if (!builder) {
+          executed.push('Puente pendiente: se requiere un Constructor');
+          addLog(state, 'Qwen 2.5 pospuso el Puente: falta un aldeano Constructor.', 'amber');
           break;
         }
-        const bridge = createBridge(state, 'Directiva Qwen 2.5');
+        if (!consumeConstructionResources(state, builder, BRIDGE_COSTS.build, true, 'Puente Fluvial', 'construccion')) {
+          const reqStr = formatResourceCost(BRIDGE_COSTS.build);
+          executed.push(`Puente pendiente: faltan recursos (${reqStr})`);
+          addLog(state, `Qwen 2.5 pospuso el Puente Fluvial: faltan ${reqStr}.`, 'amber');
+          break;
+        }
+        const bridge = createBridge(state, builder.name);
         state.knowledge += 14;
         executed.push(`Puente en X=${bridge.x}`);
-        addLog(state, `Qwen 2.5 eligió cruzar el río y construyó el Puente en X=${bridge.x}.`, 'sky');
+        addLog(state, `${builder.name} construyó el Puente Fluvial en X=${bridge.x}.`, 'sky');
         break;
       }
       case 'BUILD_SPECIAL': {
@@ -4200,24 +5374,39 @@ export function applyQwenActions(
           break;
         }
         const label = SPECIAL_BUILDING_LABELS[action.buildingType].label;
-        if (!hasAvailableOperatorForBuilding(state, action.buildingType) && !state.specialBuildings.some((b) => b.type === action.buildingType)) {
+        const spec = SPECIAL_BUILDING_COSTS[action.buildingType];
+        const existingCount = state.specialBuildings.filter((b) => b.type === action.buildingType).length;
+        if (existingCount >= spec.maxCount) {
+          executed.push(
+            spec.unique ? `${label} ya existe (único)` : `${label} al máximo (${spec.maxCount})`
+          );
+          break;
+        }
+        if (!hasAvailableOperatorForBuilding(state, action.buildingType)) {
           executed.push(`${label} cancelado: falta operario disponible`);
           addLog(state, `No se construye ${label} porque no hay ningún operario disponible para administrarlo.`, 'amber');
           break;
         }
-        const builder = state.agents.find((a) => !a.isChild) ?? null;
-        if (!consumeConstructionResources(state, builder, { wood: 3, stone: 2 })) {
-          executed.push(`${label} pendiente: faltan recursos (3 madera + 2 piedra)`);
-          addLog(state, `No hay recursos suficientes (3 madera + 2 piedra) para construir ${label}.`, 'amber');
+        const builder = findConstructor();
+        if (!builder) {
+          executed.push(`${label} pendiente: se requiere un Constructor`);
+          addLog(state, `No se construye ${label}: falta un aldeano con oficio Constructor.`, 'amber');
+          break;
+        }
+        const cost = getSpecialBuildingCost(action.buildingType, 1);
+        if (!consumeConstructionResources(state, builder, cost, true, label, 'construccion')) {
+          const reqStr = formatResourceCost(cost);
+          executed.push(`${label} pendiente: faltan recursos (${reqStr})`);
+          addLog(state, `No hay recursos suficientes (${reqStr}) en Constructor/Depósito para construir ${label}.`, 'amber');
           break;
         }
         const b = createSpecialBuilding(
           state,
           action.buildingType,
-          'Directiva Qwen 2.5',
+          builder.name,
           undefined,
           undefined,
-          builder?.constructionKnowledge ?? 25
+          builder.constructionKnowledge
         );
         if (!b) {
           executed.push(`${label} requiere operario libre`);
@@ -4226,32 +5415,84 @@ export function applyQwenActions(
         builtInBatch.add(action.buildingType);
         state.knowledge += 18;
         executed.push(`${b.name} (N${b.level})`);
-        addLog(state, `Qwen 2.5 ubicó ${b.name} en (${b.x}, ${b.y}) (Nivel ${b.level}).`, 'sky');
+        addLog(state, `${builder.name} construyó ${b.name} en (${b.x}, ${b.y}) (Nivel ${b.level}).`, 'sky');
+        break;
+      }
+      case 'UPGRADE_SPECIAL': {
+        const label = SPECIAL_BUILDING_LABELS[action.buildingType].label;
+        const builder = findConstructor();
+        if (!builder) {
+          executed.push(`Mejora de ${label} pendiente: falta Constructor`);
+          break;
+        }
+        const maxTechLv = getSpecialBuildingMaxLevelByTech(state, builder.constructionKnowledge);
+        const target = state.specialBuildings
+          .filter((b) => b.type === action.buildingType && b.level < 3)
+          .sort((a, b) => a.level - b.level)[0];
+        if (!target) {
+          executed.push(`No hay ${label} construible/mejorable`);
+          break;
+        }
+        if (target.level >= maxTechLv) {
+          executed.push(`${target.name} requiere mayor tecnología/era para subir a N${target.level + 1}`);
+          break;
+        }
+        const nextLv = (target.level + 1) as 2 | 3;
+        const cost = getSpecialBuildingCost(target.type, nextLv);
+        if (!consumeConstructionResources(state, builder, cost, true, `Mejora ${target.name}`, 'mejora')) {
+          executed.push(`Mejora de ${target.name} pendiente: faltan ${formatResourceCost(cost)}`);
+          break;
+        }
+        const upgraded = upgradeSpecialBuilding(state, target.id, builder.constructionKnowledge);
+        if (upgraded) {
+          executed.push(`${upgraded.name} mejorado a N${upgraded.level}`);
+          addLog(state, `${builder.name} mejoró ${upgraded.name} a Nivel ${upgraded.level}.`, 'sky');
+        }
         break;
       }
       case 'PLANT_CROPS': {
         state.policies.farmingFocus = true;
+        const farmSize: FarmPlot['size'] = action.farmSize ?? 'small';
+        const cost = getFarmCost(farmSize).build;
+        const builder = findConstructor();
+        if (!builder) {
+          executed.push('Cultivo pendiente: se requiere Constructor');
+          addLog(state, 'Se requiere un Constructor con materiales para cercar nuevas granjas.', 'amber');
+          break;
+        }
         let planted = 0;
         for (let i = 0; i < action.count; i++) {
-          const builder = state.agents.find((a) => !a.isChild) ?? null;
-          if (!consumeConstructionResources(state, builder, { wood: 1 })) break;
-          createFarmPlot(state, action.zone ?? 'south');
+          if (!consumeConstructionResources(state, builder, cost, true, `Granja ${farmSize}`, 'construccion')) {
+            break;
+          }
+          const zone = action.zone === 'north' && isBridgePassable(state) ? 'north' : 'south';
+          createFarmPlot(state, zone, undefined, undefined, farmSize);
           planted++;
         }
         let farmers = 0;
         for (const agent of state.agents) {
           if (!agent.isChild && farmers < 2 && agent.job === 'Recolector') {
-            agent.job = 'Agricultor';
+            setAgentJob(state, agent, 'Agricultor', 'parcelas nuevas');
             agent.taskTimer = 0;
             agent.lastQwenDecision = 'Qwen 2.5 lo asignó a cultivar nuevas parcelas.';
             farmers++;
           }
         }
-        executed.push(planted > 0 ? `+${planted} parcela(s) de cultivo` : 'Falta madera para cercar cultivos');
-        if (planted > 0) addLog(state, `Qwen 2.5 habilitó ${planted} parcela(s) agrícolas.`, 'emerald');
+        executed.push(
+          planted > 0
+            ? `+${planted} parcela(s) de cultivo (${farmSize})`
+            : `Faltan recursos (${formatResourceCost(cost)})`
+        );
+        if (planted > 0) addLog(state, `${builder.name} habilitó ${planted} parcela(s) agrícolas (${farmSize}).`, 'emerald');
         break;
       }
       case 'BUILD_HOUSES': {
+        const builder = findConstructor();
+        if (!builder) {
+          executed.push('Viviendas pendientes: se requiere Constructor');
+          addLog(state, 'Falta un aldeano Constructor para construir viviendas.', 'amber');
+          break;
+        }
         let built = 0;
         for (let i = 0; i < action.count; i++) {
           if (!shouldBuildHouse(state)) {
@@ -4260,23 +5501,32 @@ export function applyQwenActions(
             }
             break;
           }
-          const builder = state.agents.find((a) => !a.isChild) ?? null;
-          if (!consumeConstructionResources(state, builder, { wood: 3 })) {
+          const houseSize: House['size'] =
+            builder.constructionKnowledge >= 65
+              ? 'large'
+              : builder.constructionKnowledge >= 35
+                ? 'medium'
+                : 'small';
+          const baseCost = getHouseBuildCost(houseSize, false);
+          const disc = canApplyCarpentryHousingDiscount(state, baseCost);
+          const cost = getHouseBuildCost(houseSize, disc);
+          if (!consumeConstructionResources(state, builder, cost, true, `Vivienda (${houseSize})`, 'construccion')) {
             if (built === 0) {
-              executed.push('Casas pendientes: faltan recursos (3 madera por casa)');
-              addLog(state, 'Sin madera suficiente en inventarios/baúles para construir viviendas.', 'amber');
+              executed.push(`Casas pendientes: faltan recursos (${formatResourceCost(cost)})`);
+              addLog(state, `Faltan recursos (${formatResourceCost(cost)}) en Constructor/Depósito para construir viviendas.`, 'amber');
             }
             break;
           }
-          const zone = action.zone === 'north' && state.bridge ? 'north' : 'south';
+          if (disc) consumeCarpentryHousingDiscount(state, builder.name, `Vivienda (${houseSize})`);
+          const zone = action.zone === 'north' && isBridgePassable(state) ? 'north' : 'south';
           const h = createHouseNearCenter(
             state,
-            'Directiva Qwen 2.5',
+            builder.name,
             zone,
+            houseSize,
             undefined,
             undefined,
-            undefined,
-            builder?.constructionKnowledge ?? 20
+            builder.constructionKnowledge
           );
           built++;
           executed.push(`Construida ${h.name} (${h.x},${h.y})`);
@@ -4284,34 +5534,54 @@ export function applyQwenActions(
         if (built > 0) {
           addLog(
             state,
-            `Qwen 2.5 ubicó y ordenó construir ${built} vivienda(s) en ${action.zone === 'north' && state.bridge ? 'Zona Norte' : 'la aldea'}.`,
+            `${builder.name} construyó ${built} vivienda(s) en ${action.zone === 'north' && isBridgePassable(state) ? 'Zona Norte' : 'la aldea'}.`,
             'emerald'
           );
         }
         break;
       }
       case 'UPGRADE_HOUSES': {
+        const builder = findConstructor();
+        if (!builder) {
+          executed.push('Mejora pendiente: se requiere Constructor');
+          break;
+        }
+        const maxAllowed: 1 | 2 | 3 | 4 =
+          builder.constructionKnowledge >= 75
+            ? 4
+            : (Math.max(ERA_METADATA[state.era].maxHouseLevel, builder.constructionKnowledge >= 45 ? 3 : 2) as 1 | 2 | 3 | 4);
         let upgraded = 0;
         for (let i = 0; i < action.count; i++) {
-          const builder = state.agents.find((a) => !a.isChild) ?? null;
-          if (!consumeConstructionResources(state, builder, { wood: 2, stone: 1 })) break;
-          const h = upgradeLowestHouse(state, builder?.constructionKnowledge ?? 30);
+          const candidateHouse = state.houses
+            .filter((h) => h.level < maxAllowed)
+            .sort((a, b) => a.level - b.level)[0];
+          if (!candidateHouse) break;
+          const nextLv = (candidateHouse.level + 1) as 2 | 3 | 4;
+          const baseCost = getHouseUpgradeCost(candidateHouse.size, nextLv, false);
+          const disc = canApplyCarpentryHousingDiscount(state, baseCost);
+          const cost = getHouseUpgradeCost(candidateHouse.size, nextLv, disc);
+          if (!consumeConstructionResources(state, builder, cost, true, `Mejora ${candidateHouse.name}`, 'mejora')) {
+            break;
+          }
+          if (disc) consumeCarpentryHousingDiscount(state, builder.name, `Mejora ${candidateHouse.name}`);
+          const h = upgradeLowestHouse(state, builder.constructionKnowledge, candidateHouse.id);
           if (h) upgraded++;
         }
         if (upgraded > 0) {
           executed.push(`Mejoradas ${upgraded} casa(s)`);
-          addLog(state, `Qwen 2.5 mejoró ${upgraded} vivienda(s) de la aldea.`, 'sky');
+          addLog(state, `${builder.name} mejoró ${upgraded} vivienda(s) de la aldea.`, 'sky');
         } else {
-          executed.push('Mejora pendiente: faltan recursos o tope de era alcanzado');
+          executed.push('Mejora pendiente: faltan materiales exactos o tope de era alcanzado');
         }
         break;
       }
       case 'ASSIGN_ACTIVE_JOBS': {
         for (const agent of state.agents) {
-          agent.job =
+          const nextJob =
             action.preferredJob && !agent.isChild
               ? action.preferredJob
               : assignBalancedJob(agent, state.agents, state.houses, state.policies, state.specialBuildings);
+          setAgentJob(state, agent, nextJob, 'organización Qwen 2.5');
           agent.taskTimer = 0;
           agent.lastQwenDecision = `Qwen 2.5 asignó oficio ${agent.job}.`;
           agent.qwenPlan = `Ejercer ${agent.job}`;

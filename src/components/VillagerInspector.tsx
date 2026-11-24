@@ -14,17 +14,29 @@ import type {
 } from '../types/simulation';
 import {
   ANIMAL_LABELS,
+  BRIDGE_COSTS,
   canGatherOrTradeMineral,
   canGatherOrTradeWood,
   countMaestroJobs,
+  formatResourceCost,
+  getFarmCost,
   getHappinessLabel,
   getHealthStatusLabel,
+  getHouseMaintenanceCost,
+  getHouseRepairCost,
+  getHouseUpgradeCost,
   getJobMasteryTierLabel,
+  getMaintenanceStatusLabel,
   getRankTitle,
+  getSpecialBuildingCost,
+  getSpecialBuildingMaintenanceCost,
+  getSpecialBuildingRepairCost,
   HOUSE_ALLOWED_STORAGE,
   HOUSE_LEVEL_LABELS,
   HOUSE_SIZE_LABELS,
+  isBridgePassable,
   MAX_MAESTRO_JOBS_PER_AGENT,
+  PLAZA_COSTS,
   SPECIAL_BUILDING_ALLOWED_STORAGE,
   SPECIAL_BUILDING_STAFF_JOBS,
   VILLAGE_SKILLS,
@@ -202,7 +214,53 @@ export function VillagerInspector({
                   {durability}%
                 </span>
               </div>
-              <div className="text-slate-400">Residentes ({inspectedHouseResidents.length}/{inspectedHouse.capacity})</div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">Mantenimiento (30d)</span>
+                <span
+                  className={`font-medium ${
+                    (inspectedHouse.maintenanceStatus ?? 'ok') === 'ok'
+                      ? 'text-emerald-400'
+                      : inspectedHouse.maintenanceStatus === 'ruined' || inspectedHouse.maintenanceStatus === 'inoperative'
+                        ? 'text-rose-400'
+                        : 'text-amber-300'
+                  }`}
+                >
+                  {getMaintenanceStatusLabel(inspectedHouse.maintenanceStatus ?? 'ok')}
+                  {(inspectedHouse.unpaidMaintenanceDays ?? 0) > 0
+                    ? ` (${inspectedHouse.unpaidMaintenanceDays}d)`
+                    : ''}
+                </span>
+              </div>
+              <div className="text-[11px] text-slate-400 flex flex-col gap-0.5 pt-1 border-t border-slate-800/70">
+                <div>
+                  Cuota 30d:{' '}
+                  <span className="font-mono text-slate-200">
+                    {formatResourceCost(getHouseMaintenanceCost(inspectedHouse.size ?? 'medium', inspectedHouse.level))}
+                  </span>
+                </div>
+                <div>
+                  Reparación:{' '}
+                  <span className="font-mono text-slate-200">
+                    {formatResourceCost(getHouseRepairCost(inspectedHouse.level))}
+                  </span>
+                </div>
+                {inspectedHouse.level < 4 && (
+                  <div>
+                    Mejora N{inspectedHouse.level + 1}:{' '}
+                    <span className="font-mono text-sky-300">
+                      {formatResourceCost(
+                        getHouseUpgradeCost(
+                          inspectedHouse.size ?? 'medium',
+                          (inspectedHouse.level + 1) as 2 | 3 | 4
+                        )
+                      )}
+                    </span>
+                  </div>
+                )}
+              </div>
+              <div className="text-slate-400 pt-1 border-t border-slate-800/70">
+                Residentes ({inspectedHouseResidents.length}/{inspectedHouse.capacity})
+              </div>
               {inspectedHouseResidents.length === 0 ? (
                 <div className="text-slate-500 italic">Sin habitantes asignados por ahora.</div>
               ) : (
@@ -330,11 +388,71 @@ export function VillagerInspector({
               data-testid="special-operational-status"
             >
               <span className="font-semibold">
-                {inspectedSpecial.isOperational ? 'Operativo' : 'OBSOLETO (Sin administrador)'}
+                {inspectedSpecial.isOperational
+                  ? `Operativo (${Math.round((inspectedSpecial.efficiencyMultiplier ?? 1) * 100)}%)`
+                  : inspectedSpecial.maintenanceStatus === 'inoperative' ||
+                      inspectedSpecial.maintenanceStatus === 'ruined'
+                    ? 'INOPERATIVO (Deuda mantenimiento)'
+                    : 'OBSOLETO (Sin administrador)'}
               </span>
               <span className="font-mono text-[11px]">
                 {inspectedSpecial.staffIds.length} asignado(s) · {requiredJobs}
               </span>
+            </div>
+
+            <div className="bg-[#0b1120] border border-slate-800 rounded-lg p-2.5 text-[11px] flex flex-col gap-1">
+              <div className="flex items-center justify-between">
+                <span className="text-slate-400">Mantenimiento (30d)</span>
+                <span
+                  className={`font-medium ${
+                    (inspectedSpecial.maintenanceStatus ?? 'ok') === 'ok'
+                      ? 'text-emerald-400'
+                      : inspectedSpecial.maintenanceStatus === 'ruined' ||
+                          inspectedSpecial.maintenanceStatus === 'inoperative'
+                        ? 'text-rose-400'
+                        : 'text-amber-300'
+                  }`}
+                >
+                  {getMaintenanceStatusLabel(inspectedSpecial.maintenanceStatus ?? 'ok')}
+                  {(inspectedSpecial.unpaidMaintenanceDays ?? 0) > 0
+                    ? ` (${inspectedSpecial.unpaidMaintenanceDays}d)`
+                    : ''}
+                </span>
+              </div>
+              <div className="text-slate-400">
+                Cuota 30d:{' '}
+                <span className="font-mono text-slate-200">
+                  {formatResourceCost(
+                    getSpecialBuildingMaintenanceCost(
+                      inspectedSpecial.type,
+                      Math.min(3, Math.max(1, inspectedSpecial.level)) as 1 | 2 | 3
+                    )
+                  )}
+                </span>
+              </div>
+              <div className="text-slate-400">
+                Reparación:{' '}
+                <span className="font-mono text-slate-200">
+                  {formatResourceCost(
+                    getSpecialBuildingRepairCost(
+                      Math.min(3, Math.max(1, inspectedSpecial.level)) as 1 | 2 | 3
+                    )
+                  )}
+                </span>
+              </div>
+              {inspectedSpecial.level < 3 && (
+                <div className="text-slate-400">
+                  Mejora N{inspectedSpecial.level + 1}:{' '}
+                  <span className="font-mono text-sky-300">
+                    {formatResourceCost(
+                      getSpecialBuildingCost(
+                        inspectedSpecial.type,
+                        (inspectedSpecial.level + 1) as 1 | 2 | 3
+                      )
+                    )}
+                  </span>
+                </div>
+              )}
             </div>
 
             <div className="bg-[#0b1120] border border-slate-800 rounded-lg px-2.5 py-2 text-xs flex items-center justify-between">
@@ -462,6 +580,32 @@ export function VillagerInspector({
                   className="h-full bg-emerald-500 transition-all duration-200"
                   style={{ width: `${Math.round(inspectedFarm.growth)}%` }}
                 />
+              </div>
+            </div>
+
+            <div className="bg-[#0b1120] border border-slate-800 rounded-lg p-2.5 text-[11px] flex flex-col gap-1">
+              <div className="flex justify-between">
+                <span className="text-slate-400">Mantenimiento (30d)</span>
+                <span
+                  className={
+                    (inspectedFarm.maintenanceStatus ?? 'ok') === 'ok' ? 'text-emerald-400' : 'text-amber-300'
+                  }
+                >
+                  {getMaintenanceStatusLabel(inspectedFarm.maintenanceStatus ?? 'ok')}
+                  {(inspectedFarm.unpaidMaintenanceDays ?? 0) > 0
+                    ? ` (${inspectedFarm.unpaidMaintenanceDays}d)`
+                    : ''}
+                </span>
+              </div>
+              <div className="text-slate-400">
+                Cuota 30d:{' '}
+                <span className="font-mono text-slate-200">
+                  {formatResourceCost(getFarmCost(inspectedFarm.size ?? 'medium').maintenance)}
+                </span>
+              </div>
+              <div className="text-slate-400">
+                Reparación:{' '}
+                <span className="font-mono text-slate-200">1 Madera</span>
               </div>
             </div>
 
@@ -597,6 +741,31 @@ export function VillagerInspector({
             <p className="bg-[#0b1120] border border-slate-800 rounded-lg p-2.5 text-xs text-slate-300 leading-relaxed">
               Fuente central con faroles nocturnos y bancos de reunión comunitaria construidos por los aldeanos.
             </p>
+            <div className="bg-[#0b1120] border border-slate-800 rounded-lg p-2.5 text-[11px] flex flex-col gap-1">
+              <div className="flex justify-between">
+                <span className="text-slate-400">Durabilidad</span>
+                <span className="font-mono text-slate-200">{Math.round(inspectedPlaza.durability ?? 100)}%</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">Mantenimiento (30d)</span>
+                <span
+                  className={
+                    (inspectedPlaza.maintenanceStatus ?? 'ok') === 'ok' ? 'text-emerald-400' : 'text-amber-300'
+                  }
+                >
+                  {getMaintenanceStatusLabel(inspectedPlaza.maintenanceStatus ?? 'ok')}
+                  {(inspectedPlaza.unpaidMaintenanceDays ?? 0) > 0
+                    ? ` (${inspectedPlaza.unpaidMaintenanceDays}d)`
+                    : ''}
+                </span>
+              </div>
+              <div className="text-slate-400">
+                Cuota 30d: <span className="font-mono text-slate-200">{formatResourceCost(PLAZA_COSTS.maintenance)}</span>
+              </div>
+              <div className="text-slate-400">
+                Reparación: <span className="font-mono text-slate-200">{formatResourceCost(PLAZA_COSTS.repair)}</span>
+              </div>
+            </div>
             <button
               type="button"
               onClick={onDeletePlaza}
@@ -612,12 +781,13 @@ export function VillagerInspector({
   }
 
   if (selectedEntity?.kind === 'bridge' && inspectedBridge) {
+    const passable = isBridgePassable({ bridge: inspectedBridge });
     return (
       <section className="bg-[#111827] border border-slate-800 rounded-xl p-4 flex flex-col gap-3" data-testid="inspector-panel">
         <div className="flex items-start justify-between gap-2 pb-2.5 border-b border-slate-800">
           <div>
             <h2 className="text-base font-bold text-slate-50" data-testid="inspector-entity-name">
-              Puente Fluvial de Madera
+              Puente Fluvial de Roble y Piedra
             </h2>
             <div className="text-xs text-slate-400 mt-0.5">
               X: {Math.round(inspectedBridge.x)} · Durabilidad {Math.round(inspectedBridge.durability ?? 100)}%
@@ -627,6 +797,37 @@ export function VillagerInspector({
         </div>
         {!minimized && (
           <>
+            <div
+              className={`rounded-lg border px-2.5 py-2 text-xs font-semibold ${
+                passable
+                  ? 'bg-emerald-950/40 border-emerald-700/60 text-emerald-200'
+                  : 'bg-rose-950/50 border-rose-700/60 text-rose-200'
+              }`}
+              data-testid="bridge-passability-status"
+            >
+              {passable
+                ? 'Tránsito habilitado (Sur ↔ Norte)'
+                : 'INHABILITADO (120d+ sin mantenimiento o en ruinas)'}
+            </div>
+            <div className="bg-[#0b1120] border border-slate-800 rounded-lg p-2.5 text-[11px] flex flex-col gap-1">
+              <div className="flex justify-between">
+                <span className="text-slate-400">Mantenimiento (30d)</span>
+                <span className={passable ? 'text-emerald-400' : 'text-rose-400'}>
+                  {getMaintenanceStatusLabel(inspectedBridge.maintenanceStatus ?? 'ok')}
+                  {(inspectedBridge.unpaidMaintenanceDays ?? 0) > 0
+                    ? ` (${inspectedBridge.unpaidMaintenanceDays}d)`
+                    : ''}
+                </span>
+              </div>
+              <div className="text-slate-400">
+                Cuota 30d:{' '}
+                <span className="font-mono text-slate-200">{formatResourceCost(BRIDGE_COSTS.maintenance)}</span>
+              </div>
+              <div className="text-slate-400">
+                Reparación:{' '}
+                <span className="font-mono text-slate-200">{formatResourceCost(BRIDGE_COSTS.repair)}</span>
+              </div>
+            </div>
             <p className="bg-[#0b1120] border border-slate-800 rounded-lg p-2.5 text-xs text-slate-300 leading-relaxed">
               Conecta la Zona Sur con la Zona Norte sobre el río y permite el paso de caravanas y aldeanos.
             </p>
@@ -1128,11 +1329,36 @@ export function VillagerInspector({
                 type="button"
                 disabled={educationPct < 36}
                 onClick={() => onCraftTools(agent.id)}
+                title="Consume 1 Cobre + 1 Hierro (propios o en Depósito General)"
                 className="px-2 py-0.5 rounded bg-amber-900/50 hover:bg-amber-800/70 disabled:opacity-40 border border-amber-700/60 text-amber-200 text-[10px] font-sans font-medium"
               >
-                Forjar herramienta (36%+)
+                Forjar herram. (36%+ · 1 Cob.+1 Hie.)
               </button>
             </div>
+            {agent.activeConstruction && (
+              <div
+                className="mt-2 bg-amber-950/30 border border-amber-700/50 rounded-lg px-2.5 py-2 text-[11px] flex flex-col gap-1"
+                data-testid="agent-active-construction"
+              >
+                <div className="flex items-center justify-between text-amber-200 font-semibold">
+                  <span>Obra en progreso ({agent.activeConstruction.kind})</span>
+                  <span className="font-mono">
+                    {Math.min(
+                      100,
+                      Math.round(
+                        (agent.activeConstruction.elapsed /
+                          Math.max(1, agent.activeConstruction.totalDuration)) *
+                          100
+                      )
+                    )}
+                    %
+                  </span>
+                </div>
+                <div className="text-[10px] text-slate-300 font-mono">
+                  Reservado: {formatResourceCost(agent.activeConstruction.reservedMaterials)}
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="grid grid-cols-1 gap-1.5 text-xs text-slate-300 pt-1">

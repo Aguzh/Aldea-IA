@@ -243,6 +243,67 @@ export interface SkillDefinition {
   description: string;
 }
 
+export type RoadType = 'dirt' | 'stone' | 'reinforced';
+
+export type MaintenanceStatus =
+  | 'ok'
+  | 'debt_warning'
+  | 'deteriorating'
+  | 'half_efficiency'
+  | 'inoperative'
+  | 'ruined';
+
+export type ConstructionOperationType =
+  | 'construccion'
+  | 'mejora'
+  | 'reparacion'
+  | 'mantenimiento'
+  | 'cancelacion'
+  | 'produccion'
+  | 'extraccion_deposito'
+  | 'camino';
+
+export type ResourceCostMap = Partial<Record<keyof ResourceInventory, number>>;
+
+export interface ResourceOperationRecord {
+  id: number;
+  day: number;
+  actorName: string;
+  targetName: string;
+  operationType: ConstructionOperationType;
+  materials: ResourceCostMap;
+  source: string;
+  result: string;
+}
+
+export interface ActiveConstruction {
+  id: number;
+  kind:
+    | 'house'
+    | 'upgrade_house'
+    | 'plaza'
+    | 'bridge'
+    | 'farm'
+    | 'special'
+    | 'upgrade_special'
+    | 'road';
+  targetId?: number;
+  specialType?: SpecialBuildingType;
+  houseSize?: 'small' | 'medium' | 'large';
+  farmSize?: 'small' | 'medium' | 'large';
+  zone?: 'south' | 'north';
+  roadType?: RoadType;
+  withLamp?: boolean;
+  x: number;
+  y: number;
+  totalDuration: number;
+  elapsed: number;
+  reservedMaterials: ResourceCostMap;
+  fromPersonal: ResourceCostMap;
+  fromDepot: ResourceCostMap;
+  carpentryWoodConsumed: number;
+}
+
 export interface EconomyReserve {
   goldReserve: number;
   silverReserve: number;
@@ -313,6 +374,7 @@ export interface Agent {
   walkFrame: number;
   reproductionCooldown: number;
   moodModifier: number;
+  activeConstruction?: ActiveConstruction | null;
 }
 
 export interface House {
@@ -326,6 +388,10 @@ export interface House {
   capacity: number; // Chica: 4, Mediana: 6, Grande: 8
   comfortBonus: number;
   durability: number; // 0..100
+  unpaidMaintenanceDays: number;
+  maintenanceDebtCount: number;
+  maintenanceStatus: MaintenanceStatus;
+  lastMaintenanceDay: number;
   builderName: string;
   storage: HouseStorage; // Las viviendas solo almacenan Alimento (food) y Monedas (coins)
 }
@@ -343,6 +409,11 @@ export interface SpecialBuilding {
   forSale: boolean;
   price: number;
   durability: number; // 0..100
+  unpaidMaintenanceDays: number;
+  maintenanceDebtCount: number;
+  maintenanceStatus: MaintenanceStatus;
+  lastMaintenanceDay: number;
+  efficiencyMultiplier: number; // 1 normal, 0.5 a 90d sin mant., 0 si inoperativo
   staffIds: number[];
   isOperational: boolean;
   allowedStorage: Array<keyof HouseStorage>;
@@ -354,6 +425,11 @@ export interface PlazaStructure {
   y: number;
   builderName: string;
   builtDay: number;
+  durability: number;
+  unpaidMaintenanceDays: number;
+  maintenanceDebtCount: number;
+  maintenanceStatus: MaintenanceStatus;
+  lastMaintenanceDay: number;
 }
 
 export interface BridgeStructure {
@@ -361,6 +437,10 @@ export interface BridgeStructure {
   builderName: string;
   builtDay: number;
   durability: number;
+  unpaidMaintenanceDays: number;
+  maintenanceDebtCount: number;
+  maintenanceStatus: MaintenanceStatus;
+  lastMaintenanceDay: number;
 }
 
 export interface FarmPlot {
@@ -370,13 +450,21 @@ export interface FarmPlot {
   size: 'small' | 'medium' | 'large';
   growth: number;
   cropName: string;
+  durability: number;
+  unpaidMaintenanceDays: number;
+  maintenanceDebtCount: number;
+  maintenanceStatus: MaintenanceStatus;
+  lastMaintenanceDay: number;
 }
 
 export interface RoadTile {
   id: number;
   x: number;
   y: number;
+  roadType: RoadType;
+  hasLamp: boolean;
   lit: boolean;
+  durability: number;
 }
 
 export interface ResourceNode {
@@ -463,6 +551,10 @@ export interface SimulationState {
   biome: BiomeType;
   weather: WeatherType;
   tool: DivineTool;
+  selectedRoadType: RoadType;
+  selectedRoadLamp: boolean;
+  roadMaintenanceLastDay: number;
+  roadUnpaidMaintenanceDays: number;
   selectedAgentId: number | null;
   selectedEntity: SelectedEntity | null;
   highlightFamilyAgentId: number | null;
@@ -478,6 +570,7 @@ export interface SimulationState {
   representativeAgentId: number | null;
   petitionTimerSec: number;
   pendingPetition: VillagePetition | null;
+  qwenAutoRespondPetitions: boolean;
   autoPausedByPetition: boolean;
   previousSpeedBeforePetition: 0 | 1 | 2 | 4;
   lightningFlashTimer: number;
@@ -497,6 +590,7 @@ export interface SimulationState {
   policies: QwenPolicyState;
   ollama: OllamaConfig;
   logs: LogEntry[];
+  resourceLedger: ResourceOperationRecord[];
   qwenMessages: QwenMessage[];
 }
 
@@ -506,9 +600,10 @@ export type QwenAction =
   | { type: 'BUILD_PLAZA' }
   | { type: 'BUILD_BRIDGE' }
   | { type: 'BUILD_SPECIAL'; buildingType: SpecialBuildingType }
-  | { type: 'PLANT_CROPS'; count: number; zone?: 'south' | 'north' }
+  | { type: 'UPGRADE_SPECIAL'; buildingType: SpecialBuildingType }
+  | { type: 'PLANT_CROPS'; count: number; zone?: 'south' | 'north'; farmSize?: 'small' | 'medium' | 'large' }
   | { type: 'KILL_CROPS' }
-  | { type: 'ADD_ROADS' }
+  | { type: 'ADD_ROADS'; roadType?: RoadType; withLamp?: boolean }
   | { type: 'GENERATE_ECONOMY' }
   | { type: 'ALLOW_MORE_VILLAGERS'; spawnCount?: number }
   | { type: 'ASSIGN_ACTIVE_JOBS'; preferredJob?: JobType }
