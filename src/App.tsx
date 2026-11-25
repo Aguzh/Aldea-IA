@@ -39,9 +39,11 @@ import {
   getTotalCirculatingCoins,
   HOUSE_SIZE_CAPACITIES,
   infectAgent,
+  isNightMinute,
   killAgent,
   killAllCrops,
   killCropPlotAt,
+  migrateAndRecoverVillageState,
   modifyAgentKnowledge,
   modifyAgentResource,
   modifyHouseStorage,
@@ -63,6 +65,7 @@ import {
   toggleVillageLaw,
   triggerLightningStorm,
 } from './simulation/rules';
+import { soundEngine } from './audio/soundEngine';
 import type {
   Agent,
   AnimalType,
@@ -199,6 +202,8 @@ export function hydrateSimulationState(parsed: Partial<SimulationState>): Simula
 
   const nextState: SimulationState = {
     ...base,
+    schemaVersion: typeof parsed.schemaVersion === 'number' ? parsed.schemaVersion : 1,
+    pendingSounds: [],
     day: parsedDay,
     minute: clamp(finiteOr(parsed.minute, base.minute), 0, 1440),
     speed: validSpeed,
@@ -300,6 +305,9 @@ export function hydrateSimulationState(parsed: Partial<SimulationState>): Simula
     fires: Array.isArray(parsed.fires) ? parsed.fires : [],
     loans: Array.isArray(parsed.loans) ? parsed.loans : [],
     representativeAgentId: parsed.representativeAgentId ?? null,
+    representativeLastActedMinute: parsed.representativeLastActedMinute ?? 0,
+    representativeGoal:
+      parsed.representativeGoal ?? 'Garantizar viviendas, alimento y progreso continuo',
     petitionTimerSec: parsed.petitionTimerSec ?? PETITION_INTERVAL_SECONDS,
     pendingPetition: parsed.pendingPetition ?? null,
     autoPausedByPetition: parsed.autoPausedByPetition ?? false,
@@ -449,6 +457,8 @@ export function hydrateSimulationState(parsed: Partial<SimulationState>): Simula
   syncSpecialBuildingStaff(nextState);
   recalculateEconomyReserve(nextState);
   electRepresentative(nextState);
+  migrateAndRecoverVillageState(nextState);
+  nextState.pendingSounds = [];
   return nextState;
 }
 
@@ -488,9 +498,45 @@ export default function App() {
   const [isResetConfirmOpen, setIsResetConfirmOpen] = useState(false);
   const [isQwenBusy, setIsQwenBusy] = useState(false);
   const [isVerticalAuto, setIsVerticalAuto] = useState(false);
+  const [soundEnabled, setSoundEnabled] = useState<boolean>(() => soundEngine.isEnabled());
   const [serverSyncStatus, setServerSyncStatus] = useState<string>('Sincronizado');
 
   const syncUI = () => setTickVersion((v) => v + 1);
+
+  useEffect(() => {
+    const unlockOnGesture = () => {
+      soundEngine.unlock();
+      const s = stateRef.current;
+      soundEngine.syncAmbience({
+        weather: s.weather,
+        isNight: isNightMinute(s.minute),
+        paused: s.speed === 0,
+        hasLivingVillagers: s.agents.length > 0,
+      });
+    };
+    window.addEventListener('pointerdown', unlockOnGesture, { passive: true });
+    window.addEventListener('keydown', unlockOnGesture, { passive: true });
+    return () => {
+      window.removeEventListener('pointerdown', unlockOnGesture);
+      window.removeEventListener('keydown', unlockOnGesture);
+    };
+  }, []);
+
+  function handleToggleSound() {
+    const next = !soundEnabled;
+    setSoundEnabled(next);
+    soundEngine.setEnabled(next);
+    if (next) {
+      soundEngine.unlock();
+    }
+    const s = stateRef.current;
+    soundEngine.syncAmbience({
+      weather: s.weather,
+      isNight: isNightMinute(s.minute),
+      paused: s.speed === 0,
+      hasLivingVillagers: s.agents.length > 0,
+    });
+  }
 
   async function saveStateToServer(showStatus = true) {
     if (savingToServerRef.current) return;
@@ -675,6 +721,18 @@ export default function App() {
       lastTs = now;
       const state = stateRef.current;
       tickSimulation(state, elapsedSec);
+      if (Array.isArray(state.pendingSounds) && state.pendingSounds.length > 0) {
+        const cues = state.pendingSounds.splice(0, state.pendingSounds.length);
+        for (const cue of cues) {
+          soundEngine.playEvent(cue);
+        }
+      }
+      soundEngine.syncAmbience({
+        weather: state.weather,
+        isNight: isNightMinute(state.minute),
+        paused: state.speed === 0,
+        hasLivingVillagers: state.agents.length > 0,
+      });
       const canvas = canvasRef.current;
       if (canvas) {
         const ctx = canvas.getContext('2d');
@@ -771,10 +829,12 @@ export default function App() {
       ? state.agents.find((a) => a.id === inspectedAnimal.riderId)?.name ?? null
       : null;
 
-  const representativeName =
+  const representativeAgent =
     state.representativeAgentId !== null
-      ? state.agents.find((a) => a.id === state.representativeAgentId)?.name ?? null
+      ? state.agents.find((a) => a.id === state.representativeAgentId) ?? null
       : null;
+  const representativeName = representativeAgent?.name ?? null;
+  const representativeJob = representativeAgent?.job ?? null;
 
   const sickCount = state.agents.filter((a) => a.isSick).length;
   const totalCoins = getTotalCirculatingCoins(state);
@@ -1392,6 +1452,8 @@ export default function App() {
   }
 
   async function handleSendQwenDirective(text: string) {
+    soundEngine.unlock();
+    soundEngine.playEvent('chatter');
     const s = stateRef.current;
     s.qwenMessages.push({
       id: s.nextId++,
@@ -1533,9 +1595,11 @@ export default function App() {
           layoutMode: state.layoutMode,
           ollamaEnabled: state.ollama.enabled,
           ollamaModel: state.ollama.model,
+          soundEnabled,
         }}
         onSetSpeed={handleSetSpeed}
         onToggleResourcesPaused={handleToggleResourcesPaused}
+        onToggleSound={handleToggleSound}
         onSetLayout={handleSetLayout}
         onOpenStats={() => setIsStatsOpen(true)}
         onOpenFamilies={() => setIsFamiliesOpen(true)}
@@ -1634,6 +1698,9 @@ export default function App() {
             ollamaEnabled={state.ollama.enabled}
             ollamaModel={state.ollama.model}
             isBusy={isQwenBusy}
+            representativeName={representativeName}
+            representativeJob={representativeJob}
+            representativeGoal={state.representativeGoal ?? null}
             onSendDirective={handleSendQwenDirective}
           />
           <WorldControlsPanel

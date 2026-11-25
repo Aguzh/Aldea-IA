@@ -34,6 +34,7 @@ import {
   createSpecialBuilding,
   createVillagePetition,
   cureAgent,
+  CURRENT_SCHEMA_VERSION,
   DAY_DURATION_SECONDS,
   DAY_START_MINUTE,
   DAYS_PER_SEASON,
@@ -50,6 +51,7 @@ import {
   DISEASE_CATALOG,
   electRepresentative,
   enforceLawViolation,
+  ensureQwenControlledRepresentative,
   extinguishFire,
   FISH_VARIANTS,
   FOREST_MAX_X,
@@ -79,6 +81,7 @@ import {
   killAllCrops,
   killCropPlotAt,
   MAX_MAESTRO_JOBS_PER_AGENT,
+  migrateAndRecoverVillageState,
   mintBackedCoins,
   modifyAgentKnowledge,
   modifyAgentResource,
@@ -89,7 +92,9 @@ import {
   NIGHT_START_MINUTE,
   NORTH_CENTER_Y,
   PETITION_INTERVAL_SECONDS,
+  pickBestPartnerForAgent,
   pickQwenBabyName,
+  planBestConstructionProject,
   PLAZA_COSTS,
   PREGNANCY_DAYS,
   progressDiseasesDaily,
@@ -103,9 +108,11 @@ import {
   RIVER_FISH_RESTOCK_DAYS,
   RIVER_TOP_Y,
   runCouncilOfElders,
+  runQwenRepresentativeAutonomousTurn,
   runThirtyDayMaintenance,
   sanitizeQwenActions,
   sanitizeQwenReply,
+  scoreConstructionNeeds,
   setAgentJob,
   shouldBuildHouse,
   SILVER_COIN_BACKING,
@@ -120,13 +127,23 @@ import {
   toggleSterileAgent,
   toggleVillageLaw,
   transferBuildingOwnership,
+  transferMaterialsToConstructor,
   triggerLightningStorm,
   validateAndComputeConstructionPlan,
   VILLAGE_SKILLS,
   WORLD_CENTER_Y,
 } from './rules';
+import { computeAmbienceProfile } from '../audio/soundEngine';
 import type { DiseaseInfo } from '../types/simulation';
-import { createAgent, createInitialState, pushFloatingEffect, spawnResource, spawnSettlers, tickSimulation } from './engine';
+import {
+  askQwenAssistant,
+  createAgent,
+  createInitialState,
+  pushFloatingEffect,
+  spawnResource,
+  spawnSettlers,
+  tickSimulation,
+} from './engine';
 
 test('El juego inicia con 5 mujeres, 5 hombres, recursos finitos y sin ninguna construcción previa', () => {
   const state = createInitialState();
@@ -1256,7 +1273,250 @@ test('Qwen 2.5 sandbox estricto: soporta "tengan mas hjijos" sin romper nada, re
   assert.ok(state.agents.length <= 20);
 });
 
+test('Progreso autónomo anti-extinción: roles equilibrados, entrega cooperativa de materiales, avance de Saber y supervivencia multi-día', () => {
+  const state = createInitialState();
+  const builders = state.agents.filter((a) => a.job === 'Constructor');
+  const miners = state.agents.filter((a) => a.job === 'Minero');
+  const woodcutters = state.agents.filter((a) => a.job === 'Leñador');
+  const gatherers = state.agents.filter((a) => a.job === 'Recolector' || a.job === 'Pescador');
+  assert.ok(builders.length >= 2);
+  assert.ok(miners.length >= 1);
+  assert.ok(woodcutters.length >= 2);
+  assert.ok(gatherers.length >= 2);
 
+  // Entrega cooperativa: un no-constructor transfiere excedente de madera/piedra al Constructor sin violar el costo estricto de construcción
+  const carrier = woodcutters[0];
+  const builder = builders[0];
+  carrier.inv.wood = 4;
+  carrier.inv.stone = 2;
+  const builderWoodBefore = builder.inv.wood;
+  const transferred = transferMaterialsToConstructor(state, carrier, builder);
+  assert.ok(transferred >= 4);
+  assert.ok(builder.inv.wood > builderWoodBefore);
 
+  const initialKnowledge = state.knowledge;
+  const initialEduSum = state.agents.reduce((s, a) => s + a.education, 0);
 
+  // Simular varios días con tickSimulation (dt <= 0.05 como hace el loop real)
+  state.speed = 4;
+  for (let i = 0; i < 4000; i++) {
+    tickSimulation(state, 0.05);
+  }
+
+  assert.ok(state.agents.length >= 8, 'La aldea no debe extinguirse en los primeros días');
+  assert.ok(state.houses.length >= 1, 'Los constructores deben levantar al menos una casa con materiales reales');
+  assert.ok(state.knowledge > initialKnowledge, 'El saber de la aldea debe progresar');
+  assert.ok(
+    state.agents.reduce((s, a) => s + a.education, 0) > initialEduSum,
+    'El Saber de los aldeanos debe aumentar al trabajar'
+  );
+});
+
+test('Parejas con predominio heterosexual entre quienes desean hijos y minoría diversa permitida', () => {
+  const state = createInitialState();
+  state.agents = [];
+  const maleA = createAgent(state.nextId++, 'Mateo', 'M', 600, 320, null, 24);
+  const maleB = createAgent(state.nextId++, 'Tomás', 'M', 610, 320, null, 25);
+  const femaleA = createAgent(state.nextId++, 'Sofía', 'F', 620, 320, null, 23);
+  maleA.wantsChildren = true;
+  maleB.wantsChildren = true;
+  femaleA.wantsChildren = true;
+  maleA.happiness = 72;
+  maleB.happiness = 75;
+  femaleA.happiness = 72;
+  state.agents.push(maleA, maleB, femaleA);
+
+  // Quien desea hijos debe priorizar fuertemente pareja de distinto sexo sobre mismo sexo disponible
+  const pickedForMale = pickBestPartnerForAgent(state, maleA);
+  assert.ok(pickedForMale);
+  assert.equal(pickedForMale.id, femaleA.id);
+  assert.notEqual(pickedForMale.sex, maleA.sex);
+
+  // Incluso frente a compatibilidad alta, decideVillagerMajorAction rechaza mismo sexo cuando ambos quieren hijos y hay otro sexo libre
+  assert.equal(decideVillagerMajorAction(state, maleA, 'partnership', { partner: maleB }).approved, false);
+  assert.equal(decideVillagerMajorAction(state, maleA, 'partnership', { partner: femaleA }).approved, true);
+
+  // Cuando ambos no desean tener hijos, la pareja del mismo sexo sigue siendo válida como minoría permitida
+  maleA.wantsChildren = false;
+  maleB.wantsChildren = false;
+  state.agents = [maleA, maleB];
+  let approvedSameSex = false;
+  for (let i = 0; i < 40; i++) {
+    if (decideVillagerMajorAction(state, maleA, 'partnership', { partner: maleB }).approved) {
+      approvedSameSex = true;
+      break;
+    }
+  }
+  assert.equal(approvedSameSex, true);
+});
+
+test('Representante permanente controlado por Qwen 2.5:3b: reemplazo inmediato ante muerte, turno autónomo y chat directo', async () => {
+  const state = createInitialState();
+  const initialRep = ensureQwenControlledRepresentative(state);
+  assert.ok(initialRep);
+  assert.equal(initialRep.isRepresentative, true);
+  assert.equal(state.representativeAgentId, initialRep.id);
+  assert.ok(initialRep.qwenPlan && initialRep.qwenPlan.includes('Representante'));
+
+  // Turno autónomo: corrige si faltan roles críticos y fija meta de progreso
+  for (const ag of state.agents) {
+    setAgentJob(state, ag, 'Recolector', 'prueba');
+  }
+  runQwenRepresentativeAutonomousTurn(state);
+  assert.ok(state.agents.some((a) => a.job === 'Constructor'));
+  assert.ok(state.agents.some((a) => a.job === 'Minero'));
+  assert.ok(typeof state.representativeGoal === 'string' && state.representativeGoal.length > 0);
+
+  // Si muere el representante, se designa inmediatamente otro vivo
+  const deadRepId = initialRep.id;
+  killAgent(state, deadRepId);
+  const nextRep = ensureQwenControlledRepresentative(state);
+  assert.ok(nextRep);
+  assert.notEqual(nextRep.id, deadRepId);
+  assert.equal(nextRep.isRepresentative, true);
+  assert.equal(state.representativeAgentId, nextRep.id);
+
+  // Chat directo con el Representante (consulta de datos + orden real)
+  const queryReply = await askQwenAssistant(state, 'dame la cantidad total de posibles trabajadores de panaderia');
+  assert.equal(queryReply.source, 'local');
+  assert.ok(queryReply.reply.toLowerCase().includes('panader'));
+
+  const cmdReply = await askQwenAssistant(state, 'cambia 2 aldeanos a constructor');
+  assert.ok(cmdReply.reply.includes(`Representante ${nextRep.name}`));
+  assert.ok(state.agents.filter((a) => a.job === 'Constructor').length >= 2);
+});
+
+test('Audio ambiental por clima/fase y cola de sonidos para festejo, tristeza y rayos', () => {
+  const sunnyDay = computeAmbienceProfile('sunny', false, false, true);
+  assert.equal(sunnyDay.active, true);
+  assert.equal(sunnyDay.chirpMode, 'birds');
+
+  const sunnyNight = computeAmbienceProfile('sunny', true, false, true);
+  assert.equal(sunnyNight.active, true);
+  assert.equal(sunnyNight.chirpMode, 'crickets');
+
+  const rainDay = computeAmbienceProfile('rain', false, false, true);
+  assert.equal(rainDay.active, true);
+  assert.ok(rainDay.noiseGain > sunnyDay.noiseGain);
+
+  const storm = computeAmbienceProfile('thunderstorm', false, false, true);
+  assert.equal(storm.chirpMode, 'wind');
+  assert.ok(storm.noiseGain > rainDay.noiseGain);
+
+  const drought = computeAmbienceProfile('drought', false, false, true);
+  assert.equal(drought.chirpMode, 'wind');
+
+  const paused = computeAmbienceProfile('rain', false, true, true);
+  assert.equal(paused.active, false);
+  assert.equal(paused.noiseGain, 0);
+
+  // Eventos de la simulación emiten señales de audio coherentes
+  const state = createInitialState();
+  state.pendingSounds = [];
+
+  createVillagePetition(state, false, 'wealth');
+  resolvePetition(state, true, 'Jugador');
+  assert.ok(state.pendingSounds.includes('celebration'));
+
+  state.pendingSounds = [];
+  createVillagePetition(state, false, 'wealth');
+  resolvePetition(state, false, 'Jugador');
+  assert.ok(state.pendingSounds.includes('sadness'));
+
+  state.pendingSounds = [];
+  triggerLightningStorm(state);
+  assert.ok(state.pendingSounds.includes('thunder'));
+
+  state.pendingSounds = [];
+  killAgent(state, state.agents[0].id);
+  assert.ok(state.pendingSounds.includes('sadness'));
+});
+
+test('Planificación dinámica de obras según urgencia y respaldo construible sin trabas', () => {
+  const state = createInitialState();
+  const house = createHouseNearCenter(state, 'Base', 'south', 'large');
+  house.capacity = 12;
+  for (const ag of state.agents) {
+    ag.houseId = house.id;
+    ag.inv.food = 4;
+  }
+
+  // Caso 1: Emergencia sanitaria -> Hospital debe superar a Mercado/Banco/Carpintería
+  const builder = state.agents.find((a) => a.job === 'Constructor') ?? state.agents[0];
+  builder.job = 'Constructor';
+  const medicCandidate = state.agents.find((a) => a.id !== builder.id)!;
+  setAgentJob(state, medicCandidate, 'Curandero', 'emergencia');
+  const patient = state.agents.find((a) => a.id !== builder.id && a.id !== medicCandidate.id)!;
+  patient.isSick = true;
+
+  const healthScores = scoreConstructionNeeds(state);
+  const infirmaryRank = healthScores.findIndex((c) => c.kind === 'special' && c.specialType === 'infirmary');
+  const marketRank = healthScores.findIndex((c) => c.kind === 'special' && c.specialType === 'market');
+  assert.ok(infirmaryRank >= 0);
+  if (marketRank >= 0) {
+    assert.ok(infirmaryRank < marketRank, 'El Hospital debe priorizarse sobre el Mercado cuando hay enfermos');
+  }
+
+  // Caso 2: Si el objetivo principal no tiene aún minerales avanzados, bestBuildable elige una obra útil sí construible (ej. Granja)
+  patient.isSick = false;
+  builder.inv.wood = 4;
+  builder.inv.stone = 2;
+  builder.inv.iron = 0;
+  builder.inv.copper = 0;
+  builder.inv.pineWood = 0;
+  const planCheck = planBestConstructionProject(state, builder);
+  assert.ok(planCheck.topGoal);
+  assert.ok(planCheck.bestBuildable);
+  assert.equal(planCheck.bestBuildable.candidate.kind, 'farm');
+});
+
+test('Migración automática de partidas v1/estancadas y rescate anti-extinción sin reiniciar', () => {
+  const legacyState = createInitialState();
+  legacyState.schemaVersion = 1;
+  legacyState.policies.buildPriority = false;
+  legacyState.policies.workFocus = false;
+  legacyState.policies.evolutionFocus = false;
+  legacyState.policies.reproductionRestraint = true;
+
+  // Simular aldea al borde del colapso: 2 adultos restantes, comida agotada, un no-constructor con obra trabada
+  legacyState.agents = legacyState.agents.slice(0, 2);
+  legacyState.agents[0].job = 'Recolector';
+  legacyState.agents[0].activeConstruction = {
+    id: 999,
+    kind: 'house',
+    x: 500,
+    y: 400,
+    zone: 'south',
+    totalDuration: 36,
+    elapsed: 0,
+    reservedMaterials: { wood: 3 },
+    fromPersonal: { wood: 3 },
+    fromDepot: {},
+    carpentryWoodConsumed: 0,
+  };
+  legacyState.agents[0].inv.food = 0;
+  legacyState.agents[1].inv.food = 0;
+  legacyState.farms = [];
+  for (const r of legacyState.resources) {
+    if (r.type === 'food') {
+      r.amount = 0;
+      r.depleted = true;
+    }
+  }
+
+  const res = migrateAndRecoverVillageState(legacyState);
+  assert.equal(res.migrated, true);
+  assert.equal(res.rescued, true);
+  assert.equal(legacyState.schemaVersion, CURRENT_SCHEMA_VERSION);
+  assert.equal(legacyState.policies.buildPriority, true);
+  assert.equal(legacyState.policies.workFocus, true);
+  assert.equal(legacyState.policies.evolutionFocus, true);
+  assert.equal(legacyState.policies.reproductionRestraint, false);
+  assert.equal(legacyState.agents[0].activeConstruction, null);
+  assert.ok(
+    legacyState.resources.some((r) => r.type === 'food' && !r.depleted && r.amount > 0),
+    'Debe restaurar comida de emergencia para evitar extinción'
+  );
+  assert.ok(legacyState.representativeAgentId !== null);
+});
 

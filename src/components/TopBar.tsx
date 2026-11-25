@@ -19,9 +19,11 @@ interface TopBarProps {
     layoutMode: LayoutMode;
     ollamaEnabled: boolean;
     ollamaModel: string;
+    soundEnabled: boolean;
   };
   onSetSpeed: (speed: 0 | 1 | 2 | 4) => void;
   onToggleResourcesPaused: () => void;
+  onToggleSound: () => void;
   onSetLayout: (mode: LayoutMode) => void;
   onOpenStats: () => void;
   onOpenFamilies: () => void;
@@ -35,6 +37,7 @@ export function TopBar({
   snapshot,
   onSetSpeed,
   onToggleResourcesPaused,
+  onToggleSound,
   onSetLayout,
   onOpenStats,
   onOpenFamilies,
@@ -243,6 +246,25 @@ export function TopBar({
             </button>
           ))}
         </div>
+
+        <button
+          type="button"
+          onClick={onToggleSound}
+          data-testid="toggle-sound-btn"
+          aria-pressed={snapshot.soundEnabled}
+          title={
+            snapshot.soundEnabled
+              ? 'Sonido ambiental y de eventos activo (clic para silenciar)'
+              : 'Sonido silenciado (clic para activar)'
+          }
+          className={`px-2.5 py-1.5 text-xs font-medium rounded-lg border transition-colors whitespace-nowrap shrink-0 ${
+            snapshot.soundEnabled
+              ? 'border-sky-700/70 bg-sky-950/60 text-sky-200 hover:bg-sky-900/70'
+              : 'border-slate-700 bg-slate-800/80 text-slate-400 hover:text-slate-200 hover:bg-slate-700'
+          }`}
+        >
+          {snapshot.soundEnabled ? '🔊 Sonido' : '🔇 Silencio'}
+        </button>
 
         <button
           type="button"

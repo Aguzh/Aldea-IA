@@ -28,6 +28,7 @@ import {
   createAnimal,
   createDefaultLaws,
   createVillagePetition,
+  CURRENT_SCHEMA_VERSION,
   DAY_GAME_MINUTES,
   DAY_START_MINUTE,
   decideVillagerMajorAction,
@@ -37,11 +38,13 @@ import {
   deriveAgentEmotion,
   electRepresentative,
   enforceLawViolation,
+  ensureQwenControlledRepresentative,
   ERA_METADATA,
   extinguishFire,
   FISH_VARIANTS,
   FOREST_MAX_X,
   generateEmergentDialogue,
+  getAgentSurplusConstructionMaterials,
   getCompetingBuildingCount,
   getConciseTaskLabel,
   getEmotionWorkMultiplier,
@@ -62,9 +65,12 @@ import {
   NORTH_LAND_MAX_Y,
   NORTH_LAND_MIN_Y,
   PETITION_INTERVAL_SECONDS,
+  pickBestPartnerForAgent,
   pickQwenBabyName,
+  planBestConstructionProject,
   PREGNANCY_DAYS,
   PRODUCTION_INPUT_COSTS,
+  pushSoundCue,
   queryVillageData,
   recalculateEconomyReserve,
   recordDailySnapshot,
@@ -75,6 +81,7 @@ import {
   RIVER_FISH_RESTOCK_DAYS,
   RIVER_TOP_Y,
   ROAD_GRID_SIZE,
+  runQwenRepresentativeAutonomousTurn,
   SAFE_LAND_MIN_Y,
   sanitizeQwenActions,
   sanitizeQwenReply,
@@ -89,8 +96,8 @@ import {
   syncSpecialBuildingStaff,
   tameWildAnimal,
   transferInheritance,
+  transferMaterialsToConstructor,
   triggerLightningStorm,
-  validateAndComputeConstructionPlan,
   withdrawResourceFromHouse,
   WOOD_GRADE_CONFIG,
   WORLD_CENTER_X,
@@ -109,7 +116,6 @@ import type {
   RoadTile,
   SimulationState,
   SpecialBuilding,
-  SpecialBuildingType,
   TaskType,
 } from '../types/simulation';
 
@@ -327,6 +333,8 @@ function pickBiasedResourceX(type: ResourceNode['type']): number {
 
 export function createInitialState(): SimulationState {
   const state: SimulationState = {
+    schemaVersion: CURRENT_SCHEMA_VERSION,
+    pendingSounds: [],
     day: 1,
     minute: 420,
     speed: 1,
@@ -364,6 +372,8 @@ export function createInitialState(): SimulationState {
     fires: [],
     loans: [],
     representativeAgentId: null,
+    representativeLastActedMinute: 0,
+    representativeGoal: 'Garantizar viviendas, alimento y progreso continuo',
     petitionTimerSec: PETITION_INTERVAL_SECONDS,
     pendingPetition: null,
     qwenAutoRespondPetitions: false,
@@ -488,6 +498,8 @@ export function createInitialState(): SimulationState {
 
   recalculateEconomyReserve(state);
   electRepresentative(state);
+  ensureQwenControlledRepresentative(state);
+  runQwenRepresentativeAutonomousTurn(state);
 
   for (let i = 0; i < 8; i++) {
     createAnimal(
@@ -726,7 +738,44 @@ function chooseNextTask(state: SimulationState, agent: Agent, isNight = false): 
     return;
   }
 
-  // 4. Guardar alimentos/monedas en su vivienda y materiales en Depósito General
+  // 3.5. Constructor con obra en curso: reanudar inmediatamente antes de almacenar materiales
+  if (agent.job === 'Constructor' && !agent.isChild && agent.activeConstruction) {
+    const acKind = agent.activeConstruction.kind;
+    const resumeTask: TaskType =
+      acKind === 'house'
+        ? 'build_house'
+        : acKind === 'upgrade_house'
+          ? 'upgrade_house'
+          : acKind === 'plaza'
+            ? 'build_plaza'
+            : acKind === 'bridge'
+              ? 'build_bridge'
+              : acKind === 'farm'
+                ? 'plant_farm'
+                : 'build_special';
+    setAgentTask(agent, resumeTask, 42);
+    return;
+  }
+
+  // 4. Entrega cooperativa de materiales al Constructor (si aún no hay Depósito) o resguardo en casa/Depósito
+  const surplusConstruction = getAgentSurplusConstructionMaterials(agent);
+  const bridgePassableNow = isBridgePassable(state);
+  if (!depot && !agent.isChild && agent.job !== 'Constructor' && surplusConstruction >= 2) {
+    const builderTarget = state.agents.find(
+      (b) =>
+        b.id !== agent.id &&
+        !b.isChild &&
+        b.jailedDays <= 0 &&
+        b.job === 'Constructor' &&
+        (bridgePassableNow || (b.y < RIVER_TOP_Y) === (agent.y < RIVER_TOP_Y))
+    );
+    if (builderTarget) {
+      agent.qwenPlan = `Llevar ${surplusConstruction} materiales a ${builderTarget.name}`;
+      setAgentTask(agent, 'deliver_materials', 34, builderTarget.id);
+      return;
+    }
+  }
+
   const totalCarry =
     agent.inv.food +
     agent.inv.wood +
@@ -738,8 +787,18 @@ function chooseNextTask(state: SimulationState, agent: Agent, isNight = false): 
     agent.inv.iron +
     agent.inv.gold +
     agent.inv.silver;
-  if ((house || depot) && (totalCarry >= 7 || agent.coins >= 28 || agent.milkCount >= 2)) {
-    agent.qwenPlan = house ? `Resguardar alimento/monedas en ${house.name}` : 'Depositar en Depósito General';
+  const shouldStoreForBuilderWithoutDepot =
+    agent.job === 'Constructor' && !depot
+      ? agent.inv.food >= 3 || agent.coins >= 28 || agent.milkCount >= 2
+      : agent.job === 'Constructor' && depot
+        ? totalCarry >= 12 || agent.inv.food >= 3 || agent.coins >= 28 || agent.milkCount >= 2
+        : totalCarry >= (depot ? 4 : 7) || agent.coins >= 28 || agent.milkCount >= 2;
+  if ((house || depot) && shouldStoreForBuilderWithoutDepot) {
+    agent.qwenPlan = depot && surplusConstruction >= 2
+      ? `Depositar materiales en ${depot.name}`
+      : house
+        ? `Resguardar alimento/monedas en ${house.name}`
+        : 'Depositar en Depósito General';
     setAgentTask(agent, 'store_home', 32, house?.id ?? depot?.id ?? null);
     return;
   }
@@ -805,12 +864,19 @@ function chooseNextTask(state: SimulationState, agent: Agent, isNight = false): 
     return;
   }
 
-  // 9. Hambre media -> pescar (respetando dueño exclusivo de muelle, veda y stock), cultivar o recolectar
-  if (agent.hunger >= 48) {
+  // 9. Hambre media o reserva alimentaria baja -> pescar, cultivar o recolectar alimento
+  const villageFoodTotal =
+    state.agents.reduce((acc, a) => acc + a.inv.food + a.breadCount, 0) +
+    state.houses.reduce((acc, h) => acc + h.storage.food, 0);
+  const lowVillageFood = villageFoodTotal < Math.max(4, Math.ceil(state.agents.length * 1.2));
+  if (
+    agent.hunger >= 44 ||
+    (lowVillageFood && !agent.isChild && agent.job !== 'Constructor' && agent.job !== 'Curandero' && agent.inv.food < 2)
+  ) {
     const canUseAnyDock =
       state.specialBuildings.some((b) => b.type === 'dock' && b.isOperational && (b.ownerId === agent.id || b.ownerId === null));
     if (
-      canUseAnyDock &&
+      (canUseAnyDock || agent.job === 'Pescador') &&
       !isLawActive(state, 'ban_fishing') &&
       state.riverFishStock > 0 &&
       state.animals.some((a) => a.type === 'fish')
@@ -919,157 +985,107 @@ function chooseNextTask(state: SimulationState, agent: Agent, isNight = false): 
       return;
     }
 
-    if (shouldBuildHouse(state)) {
-      const zone: 'south' | 'north' =
-        isBridgePassable(state) &&
-        state.houses.length >= 4 &&
-        state.houses.filter((h) => h.zone === 'north').length < 4
-          ? 'north'
-          : 'south';
-      const plan = validateAndComputeConstructionPlan(state, agent, 'house', { zone });
-      if (plan.ok && hasEnoughBuilderOrDepotResources(state, agent, plan.cost)) {
-        const started = startConstructionProject(state, agent, 'house', { zone, duration: 36 });
-        if (started.ok) {
-          decideVillagerMajorAction(state, agent, 'construction', { chosenBuilding: 'house' });
-          setAgentTask(agent, 'build_house', 42);
-          return;
-        }
+    const { topGoal, bestBuildable } = planBestConstructionProject(state, agent);
+    if (bestBuildable) {
+      const { candidate } = bestBuildable;
+      const started = startConstructionProject(state, agent, candidate.kind, {
+        zone: candidate.zone,
+        farmSize: candidate.farmSize,
+        specialType: candidate.specialType,
+        duration: candidate.duration,
+      });
+      if (started.ok) {
+        const chosenBuilding =
+          candidate.kind === 'special' || candidate.kind === 'upgrade_special'
+            ? candidate.specialType
+            : candidate.kind === 'upgrade_house'
+              ? 'upgrade'
+              : candidate.kind === 'road'
+                ? undefined
+                : candidate.kind;
+        decideVillagerMajorAction(state, agent, 'construction', { chosenBuilding });
+        const taskType: Agent['taskType'] =
+          candidate.kind === 'house'
+            ? 'build_house'
+            : candidate.kind === 'upgrade_house'
+              ? 'upgrade_house'
+              : candidate.kind === 'plaza'
+                ? 'build_plaza'
+                : candidate.kind === 'bridge'
+                  ? 'build_bridge'
+                  : candidate.kind === 'farm'
+                    ? 'plant_farm'
+                    : 'build_special';
+        setAgentTask(agent, taskType, candidate.duration + 6);
+        return;
       }
     }
 
-    if (state.plaza === null && state.houses.length >= 2) {
-      const plan = validateAndComputeConstructionPlan(state, agent, 'plaza');
-      if (plan.ok && hasEnoughBuilderOrDepotResources(state, agent, plan.cost)) {
-        const started = startConstructionProject(state, agent, 'plaza', { duration: 42 });
-        if (started.ok) {
-          decideVillagerMajorAction(state, agent, 'construction', { chosenBuilding: 'plaza' });
-          setAgentTask(agent, 'build_plaza', 46);
-          return;
-        }
-      }
-    }
-
-    if (state.bridge === null && (state.houses.length >= 2 || state.knowledge >= 18)) {
-      const plan = validateAndComputeConstructionPlan(state, agent, 'bridge');
-      if (plan.ok && hasEnoughBuilderOrDepotResources(state, agent, plan.cost)) {
-        const started = startConstructionProject(state, agent, 'bridge', { duration: 44 });
-        if (started.ok) {
-          decideVillagerMajorAction(state, agent, 'construction', { chosenBuilding: 'bridge' });
-          setAgentTask(agent, 'build_bridge', 46);
-          return;
-        }
-      }
-    }
-
-    if (state.farms.length < 2 && Math.random() < 0.45) {
-      const plan = validateAndComputeConstructionPlan(state, agent, 'farm', { farmSize: 'small' });
-      if (plan.ok && hasEnoughBuilderOrDepotResources(state, agent, plan.cost)) {
-        const started = startConstructionProject(state, agent, 'farm', {
-          farmSize: 'small',
-          duration: 32,
-        });
-        if (started.ok) {
-          decideVillagerMajorAction(state, agent, 'construction', { chosenBuilding: 'farm' });
-          setAgentTask(agent, 'plant_farm', 38);
-          return;
-        }
-      }
-    }
-
-    if (state.knowledge >= 18) {
-      const order: SpecialBuildingType[] = [
-        'general_depot',
-        'dock',
-        'market',
-        'bakery',
-        'carpentry',
-        'school',
-        'infirmary',
-        'forge',
-        'apothecary',
-        'bank',
-        'town_hall',
-        'police_station',
-        'prison',
-      ];
-      for (const t of order) {
-        if (state.specialBuildings.some((b) => b.type === t)) continue;
-        const plan = validateAndComputeConstructionPlan(state, agent, 'special', { specialType: t });
-        if (plan.ok && hasEnoughBuilderOrDepotResources(state, agent, plan.cost)) {
-          const started = startConstructionProject(state, agent, 'special', {
-            specialType: t,
-            duration: 40,
-          });
-          if (started.ok) {
-            decideVillagerMajorAction(state, agent, 'construction', { chosenBuilding: t });
-            setAgentTask(agent, 'build_special', 44);
-            return;
-          }
-        }
-      }
-    }
-
-    if (state.houses.some((h) => h.level < ERA_METADATA[state.era].maxHouseLevel)) {
-      const plan = validateAndComputeConstructionPlan(state, agent, 'upgrade_house');
-      if (plan.ok && hasEnoughBuilderOrDepotResources(state, agent, plan.cost)) {
-        const started = startConstructionProject(state, agent, 'upgrade_house', { duration: 36 });
-        if (started.ok) {
-          decideVillagerMajorAction(state, agent, 'construction', { chosenBuilding: 'upgrade' });
-          setAgentTask(agent, 'upgrade_house', 42);
-          return;
-        }
-      }
-    }
-
-    // Progreso continuo: mejorar edificios especiales existentes cuando la era/saber lo permiten
-    for (const sb of state.specialBuildings) {
-      if (sb.level < 3) {
-        const plan = validateAndComputeConstructionPlan(state, agent, 'upgrade_special', {
-          specialType: sb.type,
-        });
-        if (plan.ok && hasEnoughBuilderOrDepotResources(state, agent, plan.cost)) {
-          const started = startConstructionProject(state, agent, 'upgrade_special', {
-            specialType: sb.type,
-            duration: 40,
-          });
-          if (started.ok) {
-            decideVillagerMajorAction(state, agent, 'construction', { chosenBuilding: sb.type });
-            setAgentTask(agent, 'build_special', 44);
-            return;
-          }
-        }
-      }
-    }
-
-    // Si faltan materiales para la próxima obra prioritaria, ir a recolectarlos
-    const nextPlan = shouldBuildHouse(state)
-      ? validateAndComputeConstructionPlan(state, agent, 'house')
-      : state.plaza === null
-        ? validateAndComputeConstructionPlan(state, agent, 'plaza')
-        : state.bridge === null
-          ? validateAndComputeConstructionPlan(state, agent, 'bridge')
-          : null;
-    const missingNode = nextPlan ? findMissingMaterialNodeType(state, agent, nextPlan.cost) : 'wood';
+    // Si faltan materiales para la obra más urgente según las necesidades vivas de la aldea, ir a recolectarlos
+    const missingNode = topGoal ? findMissingMaterialNodeType(state, agent, topGoal.plan.cost) : 'wood';
     const res =
       (missingNode ? findClosestResource(state, agent, missingNode) : null) ??
       findClosestResource(state, agent, 'wood') ??
       findClosestResource(state, agent, 'stone') ??
       findClosestResource(state, agent, null);
+    if (missingNode && !findClosestResource(state, agent, missingNode) && agent.education < 55 && Math.random() < 0.45) {
+      // Si el material faltante aún requiere mayor Saber, investigar brevemente para desbloquearlo
+      setAgentTask(agent, 'research', 26);
+      return;
+    }
     if (res) {
       setAgentTask(agent, getTaskForResource(res.type), 34, res.id);
       return;
     }
   }
 
-  if (agent.job === 'Erudito' || agent.job === 'Maestro' || (state.policies.evolutionFocus && Math.random() < 0.24)) {
-    setAgentTask(agent, 'research', 36);
+  // Búsqueda activa de pareja para adultos solteros (≥15 años) con refugio y alimento
+  if (
+    !agent.isChild &&
+    agent.ageYears >= AGE_PARTNER_MIN_YEARS &&
+    agent.partnerId === null &&
+    agent.jailedDays <= 0 &&
+    agent.hunger < 55 &&
+    agent.energy >= 35 &&
+    state.houses.length > 0 &&
+    Math.random() < 0.22
+  ) {
+    const candidate = pickBestPartnerForAgent(state, agent);
+    if (
+      candidate &&
+      (bridgePassableNow || (candidate.y < RIVER_TOP_Y) === (agent.y < RIVER_TOP_Y))
+    ) {
+      agent.thought = `Busco formar pareja y futuro con ${candidate.name}.`;
+      setAgentTask(agent, 'socialize', 30, candidate.id);
+      return;
+    }
+  }
+
+  if (
+    agent.job === 'Erudito' ||
+    agent.job === 'Maestro' ||
+    (state.policies.evolutionFocus &&
+      !shouldBuildHouse(state) &&
+      !lowVillageFood &&
+      Math.random() < 0.14)
+  ) {
+    setAgentTask(agent, 'research', 34);
     return;
   }
 
   let preferredType: ResourceNode['type'] | undefined;
-  if (agent.job === 'Recolector') preferredType = Math.random() < 0.5 ? 'food' : 'wood';
-  else if (agent.job === 'Leñador') preferredType = 'wood';
-  else if (agent.job === 'Minero') {
+  if (agent.job === 'Recolector') preferredType = Math.random() < 0.55 ? 'food' : 'wood';
+  else if (agent.job === 'Leñador') {
+    if (canGatherOrTradeWood(agent, 'oak') && Math.random() < 0.35) {
+      preferredType = 'oak_wood';
+    } else if (canGatherOrTradeWood(agent, 'maple') && Math.random() < 0.25) {
+      preferredType = 'maple_wood';
+    } else if (canGatherOrTradeWood(agent, 'pine') && Math.random() < 0.35) {
+      preferredType = 'pine_wood';
+    } else {
+      preferredType = 'wood';
+    }
+  } else if (agent.job === 'Minero') {
     if (canGatherOrTradeMineral(agent, 'gold') && !isLawActive(state, 'ban_mine_gold') && Math.random() < 0.25) {
       preferredType = 'gold';
     } else if (canGatherOrTradeMineral(agent, 'silver') && Math.random() < 0.35) {
@@ -1497,6 +1513,16 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
   }
 
   syncSpecialBuildingStaff(state);
+  ensureQwenControlledRepresentative(state);
+  const totalElapsedGameMinutes = state.day * 1440 + state.minute;
+  const lastRepMin = state.representativeLastActedMinute ?? 0;
+  if (totalElapsedGameMinutes - lastRepMin >= 60 || totalElapsedGameMinutes < lastRepMin) {
+    state.representativeLastActedMinute = totalElapsedGameMinutes;
+    runQwenRepresentativeAutonomousTurn(state);
+    if (state.ollama.enabled && state.ollama.url.trim()) {
+      void runOllamaRepresentativeGovernance(state);
+    }
+  }
   tickAnimals(state, dt);
 
   const seasonGrowthMult =
@@ -1601,6 +1627,7 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
       }
       transferInheritance(state, agent);
       addLog(state, `${agent.name} (${agent.ageYears} años) no resistió y falleció.`, 'rose');
+      pushSoundCue(state, 'sadness');
       continue;
     }
 
@@ -1712,16 +1739,42 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
         }
         break;
       }
+      case 'deliver_materials': {
+        const builder =
+          (agent.taskTargetId !== null
+            ? state.agents.find((b) => b.id === agent.taskTargetId && b.job === 'Constructor' && !b.isChild)
+            : null) ??
+          state.agents.find((b) => b.id !== agent.id && b.job === 'Constructor' && !b.isChild);
+        if (!builder) {
+          agent.taskTimer = 0;
+          break;
+        }
+        const dist = moveTowards(agent, builder.x, builder.y, moveSpeed * 1.05, dt, currentBridgeX);
+        if (dist <= 26) {
+          const moved = transferMaterialsToConstructor(state, agent, builder);
+          if (moved > 0) {
+            agent.education = clamp(agent.education + 0.4, 0, 100);
+            syncAgentSkills(agent);
+            pushFloatingEffect(state, builder.x, builder.y - 12, `+${moved} 📦`, '#38bdf8');
+          }
+          agent.taskTimer = 0;
+        }
+        break;
+      }
       case 'store_home': {
         const house = state.houses.find((h) => h.id === agent.houseId);
-        const destX = house ? house.x : depot ? depot.x : agent.x;
-        const destY = house ? house.y + 10 : depot ? depot.y + 10 : agent.y;
+        const goDepotFirst =
+          Boolean(depot) &&
+          getAgentSurplusConstructionMaterials(agent) >= 2 &&
+          agent.inv.food <= 2;
+        const destX = goDepotFirst && depot ? depot.x : house ? house.x : depot ? depot.x : agent.x;
+        const destY = goDepotFirst && depot ? depot.y + 10 : house ? house.y + 10 : depot ? depot.y + 10 : agent.y;
         if (!house && !depot) {
           agent.taskTimer = 0;
           break;
         }
         const dist = moveTowards(agent, destX, destY, moveSpeed, dt, currentBridgeX);
-        if (dist <= 20) {
+        if (dist <= 24) {
           let moved = 0;
           if (house) moved += depositResourcesToHouse(agent, house, 'surplus', depot);
           else if (depot) moved += depositMaterialsToBuilding(agent, depot, 'surplus');
@@ -1847,6 +1900,8 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
           const dockBonus = myDock ? Math.max(2, Math.round(4 / getCompetingBuildingCount(state, 'dock'))) : 1;
           agent.coins += mintBackedCoins(state, dockBonus);
           advanceJobMastery(agent, 'Pescador', 3);
+          agent.education = clamp(agent.education + 0.5, 0, 100);
+          syncAgentSkills(agent);
           state.knowledge += 1;
           addLog(state, `${agent.name} pescó en el río (+${myDock ? 2 : 1} comida · stock río: ${state.riverFishStock}/${state.riverFishMaxStock}).`, 'sky');
           agent.taskTimer = 0;
@@ -1878,6 +1933,8 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
             pushFloatingEffect(state, agent.x, agent.y - 10, '+1 🥚', '#fde68a');
           }
           advanceJobMastery(agent, 'Agricultor', 2);
+          agent.education = clamp(agent.education + 0.4, 0, 100);
+          syncAgentSkills(agent);
           agent.taskTimer = 0;
         }
         break;
@@ -1943,6 +2000,14 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
           if (target.type === 'wood' && agent.job === 'Carpintero') {
             agent.carpentryKnowledge = clamp(agent.carpentryKnowledge + 2, 0, 100);
           }
+          const eduGain =
+            target.type === 'gold' || target.type === 'silver' || target.type === 'iron'
+              ? 0.85
+              : target.type === 'stone' || target.type === 'copper' || target.type === 'pine_wood'
+                ? 0.65
+                : 0.45;
+          agent.education = clamp(agent.education + eduGain, 0, 100);
+          syncAgentSkills(agent);
           advanceJobMastery(agent, agent.job, 2);
           state.knowledge +=
             target.type === 'gold' || target.type === 'silver' || target.type === 'iron'
@@ -1973,9 +2038,12 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
             agent.inv.food += harvestBonus;
             agent.coins += mintBackedCoins(state, 2);
             advanceJobMastery(agent, 'Agricultor', 3);
+            agent.education = clamp(agent.education + 0.7, 0, 100);
+            syncAgentSkills(agent);
             state.knowledge += 2;
             pushFloatingEffect(state, plot.x, plot.y - 10, `+${harvestBonus} 🌾`, '#facc15');
             addLog(state, `${agent.name} cosechó ${plot.cropName} (+${harvestBonus} raciones).`, 'emerald');
+            pushSoundCue(state, 'celebration');
             agent.taskTimer = 0;
           } else {
             plot.growth = clamp(plot.growth + 0.14 * dt, 0, 100);
@@ -2008,6 +2076,8 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
             const doneX = ac.x;
             const doneY = ac.y;
             if (completeActiveConstruction(state, agent)) {
+              agent.education = clamp(agent.education + 1.2, 0, 100);
+              syncAgentSkills(agent);
               pushFloatingEffect(state, doneX, doneY - 14, '🏠 Obra lista', '#4ade80');
             }
             agent.taskTimer = 0;
@@ -2051,6 +2121,8 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
           }
           agent.coins += mintBackedCoins(state, 5);
           advanceJobMastery(agent, 'Curandero', 4);
+          agent.education = clamp(agent.education + 0.8, 0, 100);
+          syncAgentSkills(agent);
           state.knowledge += 3;
           addLog(state, `${agent.name} atendió a ${patient.name}.`, 'emerald');
           agent.taskTimer = 0;
@@ -2066,9 +2138,9 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
         if (dist <= 75) {
           const mentorBoost = mentor ? 1.5 : 1;
           const schoolEff = school ? school.efficiencyMultiplier ?? 1 : 1;
-          state.knowledge += (hasSchool ? 0.18 * schoolEff : 0.08) * dt * mentorBoost;
-          agent.education = clamp(agent.education + (hasSchool ? 0.25 * schoolEff : 0.09) * dt * mentorBoost, 0, 100);
-          agent.constructionKnowledge = clamp(agent.constructionKnowledge + (hasSchool ? 0.12 * schoolEff : 0.04) * dt * mentorBoost, 0, 100);
+          state.knowledge += (hasSchool ? 0.24 * schoolEff : 0.14) * dt * mentorBoost;
+          agent.education = clamp(agent.education + (hasSchool ? 0.30 * schoolEff : 0.20) * dt * mentorBoost, 0, 100);
+          agent.constructionKnowledge = clamp(agent.constructionKnowledge + (hasSchool ? 0.15 * schoolEff : 0.08) * dt * mentorBoost, 0, 100);
           if (mentor && mentor.job === 'Carpintero') {
             agent.carpentryKnowledge = clamp(agent.carpentryKnowledge + 0.16 * dt, 0, 100);
           }
@@ -2260,7 +2332,46 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
         }
         break;
       }
-      case 'socialize':
+      case 'socialize': {
+        const targetPartner =
+          agent.taskTargetId !== null
+            ? state.agents.find((o) => o.id === agent.taskTargetId && o.id !== agent.id)
+            : null;
+        if (targetPartner) {
+          const sdist = moveTowards(agent, targetPartner.x, targetPartner.y, moveSpeed * 0.95, dt, currentBridgeX);
+          if (sdist <= 26) {
+            if (
+              !agent.isChild &&
+              !targetPartner.isChild &&
+              agent.ageYears >= AGE_PARTNER_MIN_YEARS &&
+              targetPartner.ageYears >= AGE_PARTNER_MIN_YEARS &&
+              agent.partnerId === null &&
+              targetPartner.partnerId === null
+            ) {
+              const decision = decideVillagerMajorAction(state, agent, 'partnership', { partner: targetPartner });
+              if (decision.approved) {
+                agent.partnerId = targetPartner.id;
+                targetPartner.partnerId = agent.id;
+                pushFloatingEffect(state, agent.x, agent.y - 12, '💕 Pareja', '#f472b6');
+                addLog(state, `${agent.name} y ${targetPartner.name} formaron pareja.`, 'violet');
+                pushSoundCue(state, 'celebration');
+              }
+            }
+            agent.taskTimer = 0;
+          }
+          break;
+        }
+        const stayNorthS = agent.y < RIVER_TOP_Y && currentBridgeX === null;
+        const anchorXS = state.plaza && !stayNorthS ? state.plaza.x : WORLD_CENTER_X;
+        const anchorYS = stayNorthS ? NORTH_CENTER_Y : state.plaza ? state.plaza.y : SOUTH_CENTER_Y;
+        const angleS = (agent.id * 1.7 + state.minute * 0.01) % (Math.PI * 2);
+        const txS = clamp(anchorXS + Math.cos(angleS) * 180, 48, CANVAS_WIDTH - 48);
+        const tyS = stayNorthS
+          ? clamp(anchorYS + Math.sin(angleS) * 90, NORTH_LAND_MIN_Y + 18, NORTH_LAND_MAX_Y - 18)
+          : clamp(anchorYS + Math.sin(angleS) * 130, SAFE_LAND_MIN_Y + 18, CANVAS_HEIGHT - 48);
+        moveTowards(agent, txS, tyS, moveSpeed * 0.55, dt, currentBridgeX);
+        break;
+      }
       case 'idle':
       case 'eat': {
         const stayNorth = agent.y < RIVER_TOP_Y && currentBridgeX === null;
@@ -2316,7 +2427,7 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
     if (state.highlightFamilyAgentId !== null && deadSet.has(state.highlightFamilyAgentId)) state.highlightFamilyAgentId = null;
     syncSpecialBuildingStaff(state);
     recalculateEconomyReserve(state);
-    electRepresentative(state);
+    ensureQwenControlledRepresentative(state);
   }
 
   // Interacciones sociales emergentes, parejas (desde 15 años) y concepción de embarazo (desde 20 años, 3 días)
@@ -2325,12 +2436,13 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
     for (let j = i + 1; j < state.agents.length; j++) {
       const b = state.agents[j];
       const d = Math.hypot(b.x - a.x, b.y - a.y);
-      if (d < 24 && Math.random() < 0.008 * state.speed) {
+      if (d < 28 && Math.random() < 0.032 * state.speed) {
         a.talkingTimer = 14;
         b.talkingTimer = 14;
         const dialogue = generateEmergentDialogue(a, b, state);
         a.lastDialogue = dialogue;
         b.lastDialogue = dialogue;
+        pushSoundCue(state, 'chatter');
 
         if (a.hunger > 48 && b.inv.food > 1 && a.coins >= 3) {
           b.inv.food -= 1;
@@ -2370,17 +2482,18 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
           b.ageYears >= AGE_PARTNER_MIN_YEARS &&
           a.partnerId === null &&
           b.partnerId === null &&
-          Math.random() < 0.09
+          Math.random() < 0.34
         ) {
           const decision = decideVillagerMajorAction(state, a, 'partnership', { partner: b });
           if (decision.approved) {
             a.partnerId = b.id;
             b.partnerId = a.id;
             addLog(state, `${a.name} y ${b.name} formaron pareja.`, 'violet');
+            pushSoundCue(state, 'celebration');
           }
         }
 
-        const birthChance = state.policies.reproductionRestraint ? 0.02 : 0.045;
+        const birthChance = state.policies.reproductionRestraint ? 0.06 : 0.22;
         if (
           a.partnerId === b.id &&
           canAgentsReproduce(a, b, state.houses, state.agents, state.policies) &&
@@ -2412,6 +2525,7 @@ export function tickSimulation(state: SimulationState, elapsedSeconds = 1 / 60):
   if (nextEra !== state.era) {
     state.era = nextEra;
     addLog(state, `¡Hito histórico! La aldea evolucionó a ${ERA_METADATA[nextEra].label}.`, 'emerald');
+    pushSoundCue(state, 'celebration');
   }
   recalculateEconomyReserve(state);
 }
@@ -4075,10 +4189,65 @@ export function renderWorld(
   ctx.restore();
 }
 
+export async function runOllamaRepresentativeGovernance(state: SimulationState): Promise<void> {
+  if (!state.ollama.enabled || !state.ollama.url.trim() || ollamaDecisionInFlight) return;
+  const rep = ensureQwenControlledRepresentative(state);
+  if (!rep) return;
+
+  ollamaDecisionInFlight = true;
+  try {
+    const villageSummary = buildQwenVillageTelemetry(state);
+    const prompt = `Sos ${rep.name}, el aldeano Representante de "Aldea IA", controlado permanentemente por Qwen 2.5:3b.
+REGLA DE SEGURIDAD ESTRICTA (SANDBOX):
+- SOLO podés emitir acciones válidas sobre el mapa/aldea usando el esquema JSON. NUNCA intentes tocar archivos ni sistema.
+Estado actual de la aldea: ${JSON.stringify(villageSummary)}.
+Decidí el próximo objetivo de progreso del Representante para que la aldea crezca, construya casas, junte recursos, eduque y no se extinga.
+Respondé EXCLUSIVAMENTE un JSON válido:
+{
+  "goal": "frase corta de objetivo actual (máx 70 caracteres)",
+  "actions": []
+}`;
+    const res = await fetch(state.ollama.url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: state.ollama.model,
+        prompt,
+        stream: false,
+        format: 'json',
+      }),
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+    const raw = typeof data?.response === 'string' ? data.response : '';
+    const parsed = JSON.parse(raw) as { goal?: unknown; actions?: unknown };
+    if (parsed && typeof parsed === 'object') {
+      if (typeof parsed.goal === 'string' && parsed.goal.trim()) {
+        const cleanGoal = parsed.goal.trim().slice(0, 90);
+        state.representativeGoal = cleanGoal;
+        rep.qwenPlan = `Representante Qwen 2.5: ${cleanGoal}`;
+        rep.thought = `Como Representante dirigido por Qwen 2.5:3b, impulso: ${cleanGoal}.`;
+        rep.lastQwenDecision = `Qwen 2.5:3b (Representante): ${cleanGoal}`;
+      }
+      const safeActions = sanitizeQwenActions(parsed.actions).filter(
+        (a) => a.type !== 'TRIGGER_FIRE' && a.type !== 'TRIGGER_LIGHTNING_STORM' && a.type !== 'KILL_CROPS'
+      );
+      if (safeActions.length > 0) {
+        applyQwenActions(state, safeActions, spawnSettlers);
+      }
+    }
+  } catch {
+    // Mantiene el turno autónomo local del Representante
+  } finally {
+    ollamaDecisionInFlight = false;
+  }
+}
+
 export async function askQwenAssistant(
   state: SimulationState,
   userPrompt: string
 ): Promise<{ reply: string; appliedRules: string[]; source: 'ollama' | 'local' }> {
+  const rep = ensureQwenControlledRepresentative(state);
   const agentNames = state.agents.map((a) => a.name);
 
   const localResult = interpretQwenDirective(userPrompt, agentNames, state);
@@ -4088,16 +4257,17 @@ export async function askQwenAssistant(
     try {
       const villageSummary = buildQwenVillageTelemetry(state);
 
-      const systemPrompt = `Eres Qwen 2.5, IA dentro del mundo de "Aldea IA".
+      const systemPrompt = `Eres Qwen 2.5:3b controlando en todo momento al aldeano Representante "${rep?.name ?? 'Representante'}" (${rep?.job ?? 'Aldeano'}, objetivo: "${state.representativeGoal ?? 'Progreso continuo'}") dentro de "Aldea IA".
+El jugador está hablando directamente con vos a través del Representante.
 REGLA DE SEGURIDAD ESTRICTA (SANDBOX):
 - SOLO puedes consultar datos de la aldea o ejecutar acciones permitidas SOBRE EL MAPA DE LA ALDEA usando el esquema JSON exacto de abajo.
 - NUNCA modifiques archivos, código fuente, configuración del sistema, inicio de la app, ni agregues código o comandos de sistema.
 
 Datos completos en tiempo real de la aldea: ${JSON.stringify(villageSummary)}.
-Orden o pregunta del jugador: "${userPrompt}".
+Orden o pregunta del jugador al Representante: "${userPrompt}".
 Responde EXCLUSIVAMENTE un JSON válido con:
 {
-  "reply": "Texto corto en español confirmando los datos reales o lo ejecutado en el mapa",
+  "reply": "Texto corto en español hablando como el Representante (Qwen 2.5:3b) confirmando los datos reales o lo ejecutado en el mapa",
   "actions": [
     { "type": "ALLOW_MORE_VILLAGERS", "spawnCount": 0, "encouragePregnancies": true },
     { "type": "ASSIGN_ACTIVE_JOBS", "preferredJob": "Panadero|Minero|Constructor|Carpintero|...", "fraction": 0.5, "count": 5, "fromJob": "...", "forceChange": true },
@@ -4178,6 +4348,9 @@ Si es una pregunta de datos (ej. posibles trabajadores), usa los números exacto
 
           const appliedRules = applyQwenActions(state, finalActions, spawnSettlers);
           const safeReply = sanitizeQwenReply(parsed.reply, localResult.reply);
+          if (rep) {
+            rep.lastQwenDecision = `Representante (Qwen 2.5:3b) respondió: ${safeReply.slice(0, 120)}`;
+          }
           return {
             reply: appliedRules.length > 0 ? safeReply : localResult.reply,
             appliedRules,
@@ -4200,8 +4373,12 @@ Si es una pregunta de datos (ej. posibles trabajadores), usa los números exacto
 
   try {
     const appliedRules = applyQwenActions(state, localResult.actions, spawnSettlers);
+    const repPrefix = rep ? `[Representante ${rep.name} · Qwen 2.5] ` : '';
+    if (rep) {
+      rep.lastQwenDecision = `Representante (Qwen 2.5) ejecutó orden del jugador.`;
+    }
     return {
-      reply: localResult.reply,
+      reply: `${repPrefix}${localResult.reply}`,
       appliedRules,
       source: 'local',
     };

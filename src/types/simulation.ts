@@ -69,6 +69,7 @@ export type TaskType =
   | 'repair_building'
   | 'extinguish_fire'
   | 'store_home'
+  | 'deliver_materials'
   | 'build_house'
   | 'upgrade_house'
   | 'build_plaza'
@@ -273,6 +274,7 @@ export type ConstructionOperationType =
   | 'cancelacion'
   | 'produccion'
   | 'extraccion_deposito'
+  | 'deposito'
   | 'camino';
 
 export type ResourceCostMap = Partial<Record<keyof ResourceInventory, number>>;
@@ -563,7 +565,10 @@ export interface FloatingEffect {
   maxTtl: number;
 }
 
+export type SoundCue = 'chatter' | 'celebration' | 'sadness' | 'thunder' | 'build';
+
 export interface SimulationState {
+  schemaVersion?: number;
   day: number;
   minute: number;
   speed: 0 | 1 | 2 | 4;
@@ -590,6 +595,8 @@ export interface SimulationState {
   fires: FireHazard[];
   loans: BankLoan[];
   representativeAgentId: number | null;
+  representativeLastActedMinute?: number;
+  representativeGoal?: string;
   petitionTimerSec: number;
   pendingPetition: VillagePetition | null;
   qwenAutoRespondPetitions: boolean;
@@ -615,6 +622,7 @@ export interface SimulationState {
   resourceLedger: ResourceOperationRecord[];
   qwenMessages: QwenMessage[];
   floatingEffects: FloatingEffect[];
+  pendingSounds?: SoundCue[];
 }
 
 export type QwenAction =

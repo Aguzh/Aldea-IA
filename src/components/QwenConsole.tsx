@@ -7,6 +7,9 @@ interface QwenConsoleProps {
   ollamaEnabled: boolean;
   ollamaModel: string;
   isBusy: boolean;
+  representativeName?: string | null;
+  representativeJob?: string | null;
+  representativeGoal?: string | null;
   onSendDirective: (text: string) => void;
 }
 
@@ -24,6 +27,9 @@ export function QwenConsole({
   ollamaEnabled,
   ollamaModel,
   isBusy,
+  representativeName,
+  representativeJob,
+  representativeGoal,
   onSendDirective,
 }: QwenConsoleProps) {
   const [input, setInput] = useState('');
@@ -57,8 +63,8 @@ export function QwenConsole({
   return (
     <section className="bg-[#111827] border border-slate-800 rounded-xl p-4 flex flex-col gap-3 shrink-0" data-testid="qwen-console-panel">
       <div className="flex items-center justify-between gap-2">
-        <h2 className="text-xs font-semibold tracking-wide text-slate-300">
-          Hablar con Qwen 2.5
+        <h2 className="text-xs font-semibold tracking-wide text-slate-200">
+          Hablar con el Representante · Qwen 2.5
         </h2>
         <div className="flex items-center gap-2">
           <span className="text-[11px] text-slate-400 whitespace-nowrap">
@@ -79,6 +85,24 @@ export function QwenConsole({
 
       {!minimized && (
         <>
+          <div className="bg-[#0b1120] border border-violet-700/50 rounded-lg px-2.5 py-2 flex flex-col gap-0.5 text-[11px]" data-testid="qwen-representative-banner">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-violet-200 font-semibold">
+                {representativeName
+                  ? `Representante: ${representativeName}${representativeJob ? ` (${representativeJob})` : ''}`
+                  : 'Representante: Pendiente'}
+              </span>
+              <span className="text-[10px] font-mono text-violet-300 whitespace-nowrap shrink-0">
+                Qwen 2.5:3b
+              </span>
+            </div>
+            {representativeGoal && (
+              <div className="text-[10px] text-slate-400 leading-snug">
+                Meta autónoma: {representativeGoal}
+              </div>
+            )}
+          </div>
+
           {activePolicies.length > 0 && (
             <div className="text-[11px] text-emerald-400/90 leading-relaxed">
               Reglas activas: {activePolicies.join(' · ')}
@@ -114,7 +138,9 @@ export function QwenConsole({
                 }`}
               >
                 <div className="text-[10px] text-slate-400 mb-0.5">
-                  {m.role === 'user' ? 'Vos' : `Qwen 2.5 (${m.source === 'ollama' ? 'Ollama' : 'Reglas'})`}
+                  {m.role === 'user'
+                    ? 'Vos'
+                    : `${representativeName ? `Rep. ${representativeName} · ` : ''}Qwen 2.5 (${m.source === 'ollama' ? 'Ollama' : 'Reglas'})`}
                 </div>
                 <div>{m.text}</div>
                 {m.appliedRules && m.appliedRules.length > 0 && (
@@ -128,14 +154,14 @@ export function QwenConsole({
 
           <form onSubmit={handleSubmit} className="flex gap-2">
             <label htmlFor="qwen-directive-input" className="sr-only">
-              Orden para Qwen 2.5
+              Orden o mensaje para el Representante (Qwen 2.5)
             </label>
             <input
               id="qwen-directive-input"
               type="text"
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="Ej: Construir ayuntamiento, préstamos o veda..."
+              placeholder="Mensaje al Representante..."
               className="flex-1 bg-[#0b1120] border border-slate-700 rounded-lg px-2.5 py-2 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-emerald-500"
             />
             <button

@@ -31,6 +31,7 @@ import type {
   SeasonType,
   SimulationState,
   SkillDefinition,
+  SoundCue,
   SpecialBuilding,
   SpecialBuildingType,
   TaskType,
@@ -141,6 +142,8 @@ export const DAY_START_MINUTE = 360;
 export const NIGHT_START_MINUTE = 1200;
 export const DAY_GAME_MINUTES = NIGHT_START_MINUTE - DAY_START_MINUTE; // 840
 export const NIGHT_GAME_MINUTES = 1440 - DAY_GAME_MINUTES; // 600
+
+export const CURRENT_SCHEMA_VERSION = 2;
 
 // Calendario: 30 días por estación, 120 días por año completo
 export const DAYS_PER_SEASON = 30;
@@ -504,6 +507,14 @@ export function clamp(val: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, val));
 }
 
+export function pushSoundCue(state: SimulationState, cue: SoundCue): void {
+  if (!Array.isArray(state.pendingSounds)) state.pendingSounds = [];
+  if (state.pendingSounds.length >= 12) return;
+  if (!state.pendingSounds.includes(cue)) {
+    state.pendingSounds.push(cue);
+  }
+}
+
 export function isNightMinute(minute: number): boolean {
   const m = ((minute % 1440) + 1440) % 1440;
   return m < DAY_START_MINUTE || m >= NIGHT_START_MINUTE;
@@ -835,6 +846,8 @@ export function getConciseTaskLabel(taskType: TaskType): string {
       return 'Apagando incendio';
     case 'store_home':
       return 'Guardando en baúl/depósito';
+    case 'deliver_materials':
+      return 'Entregando materiales';
     case 'build_house':
       return 'Construyendo casa';
     case 'upgrade_house':
@@ -1018,28 +1031,28 @@ export function assignBalancedJob(
     return 'Pescador';
   }
 
-  if (counts.Carpintero < 1 && agents.length >= 6) return 'Carpintero';
-  if (counts.Guardián < 1 && agents.length >= 8) return 'Guardián';
-  if (counts.Artesano < 1 && agents.length >= 9) return 'Artesano';
+  if (counts.Carpintero < 1 && houses.length >= 2 && agents.length >= 11) return 'Carpintero';
+  if (counts.Guardián < 1 && houses.length >= 2 && agents.length >= 12) return 'Guardián';
+  if (counts.Artesano < 1 && houses.length >= 2 && agents.length >= 13) return 'Artesano';
 
   if (policies.economyFocus && counts.Comerciante < Math.max(2, Math.ceil(agents.length / 6))) {
     return 'Comerciante';
   }
   if (
-    (homelessCount > 2 || policies.buildPriority || houses.length < Math.ceil(agents.length / 4)) &&
+    (homelessCount > 1 || policies.buildPriority || houses.length < Math.ceil(agents.length / 4)) &&
     counts.Constructor < Math.max(2, Math.ceil(agents.length / 5))
   ) {
     return 'Constructor';
   }
-  if ((policies.evolutionFocus || counts.Erudito < 1) && counts.Erudito < Math.max(1, Math.ceil(agents.length / 7))) {
+  if ((policies.evolutionFocus || counts.Erudito < 1) && counts.Erudito < Math.max(1, Math.floor(agents.length / 7))) {
     return 'Erudito';
   }
   if (policies.farmingFocus && counts.Agricultor < Math.max(2, Math.ceil(agents.length / 6))) {
     return 'Agricultor';
   }
-  if (counts.Recolector < Math.max(2, Math.ceil(agents.length / 6))) return 'Recolector';
-  if (counts.Leñador < Math.max(1, Math.ceil(agents.length / 6))) return 'Leñador';
-  if (counts.Minero < Math.max(1, Math.ceil(agents.length / 6))) return 'Minero';
+  if (counts.Recolector < Math.max(2, Math.ceil(agents.length / 5))) return 'Recolector';
+  if (counts.Leñador < Math.max(2, Math.ceil(agents.length / 5))) return 'Leñador';
+  if (counts.Minero < Math.max(2, Math.ceil(agents.length / 5))) return 'Minero';
   if (counts.Agricultor < Math.max(1, Math.ceil(agents.length / 7))) return 'Agricultor';
   if (counts.Comerciante < Math.max(1, Math.floor(agents.length / 7))) return 'Comerciante';
   return 'Recolector';
@@ -1678,6 +1691,78 @@ export function consumeConstructionResources(
   ).ok;
 }
 
+const CONSTRUCTION_DELIVERY_KEYS: Array<keyof ResourceInventory> = [
+  'wood',
+  'pineWood',
+  'mapleWood',
+  'oakWood',
+  'stone',
+  'copper',
+  'iron',
+];
+
+export function getAgentSurplusConstructionMaterials(agent: Agent): number {
+  const keepWood = agent.job === 'Boticario' ? 1 : 0;
+  const keepCopper = agent.job === 'Herrero' || agent.job === 'Artesano' ? 1 : 0;
+  const keepIron = agent.job === 'Herrero' || agent.job === 'Artesano' ? 1 : 0;
+  return (
+    Math.max(0, agent.inv.wood - keepWood) +
+    agent.inv.pineWood +
+    agent.inv.mapleWood +
+    agent.inv.oakWood +
+    agent.inv.stone +
+    Math.max(0, agent.inv.copper - keepCopper) +
+    Math.max(0, agent.inv.iron - keepIron)
+  );
+}
+
+/**
+ * Entrega cooperativa física de materiales recolectados desde un aldeano no-constructor hacia un Constructor.
+ * Mantiene intacto el origen estricto en startConstructionProject (solo Constructor + Depósito General).
+ */
+export function transferMaterialsToConstructor(
+  state: SimulationState,
+  carrier: Agent,
+  builder: Agent
+): number {
+  if (carrier.id === builder.id || carrier.isChild || builder.isChild || builder.jailedDays > 0) {
+    return 0;
+  }
+  const movedMaterials: ResourceCostMap = {};
+  let totalMoved = 0;
+
+  for (const key of CONSTRUCTION_DELIVERY_KEYS) {
+    const reserveKeep =
+      key === 'wood' && carrier.job === 'Boticario'
+        ? 1
+        : (key === 'copper' || key === 'iron') &&
+            (carrier.job === 'Herrero' || carrier.job === 'Artesano')
+          ? 1
+          : 0;
+    const avail = Math.max(0, carrier.inv[key] - reserveKeep);
+    if (avail > 0) {
+      carrier.inv[key] -= avail;
+      builder.inv[key] += avail;
+      movedMaterials[key] = avail;
+      totalMoved += avail;
+    }
+  }
+
+  if (totalMoved > 0) {
+    carrier.thought = `Entregué ${totalMoved} materiales a ${builder.name} para construir.`;
+    builder.thought = `Recibí ${totalMoved} materiales de ${carrier.name} para levantar obras.`;
+    recordResourceOperation(state, {
+      actorName: carrier.name,
+      targetName: `Constructor ${builder.name}`,
+      operationType: 'deposito',
+      materials: movedMaterials,
+      source: `Inventario (${carrier.name})`,
+      result: `+${totalMoved} materiales al Constructor`,
+    });
+  }
+  return totalMoved;
+}
+
 export function craftToolsForAgent(state: SimulationState, agent: Agent): boolean {
   if (agent.education < 36) return false;
   const need = PRODUCTION_INPUT_COSTS.forgeTool; // 1 copper + 1 iron
@@ -1735,6 +1820,50 @@ export function craftToolsForAgent(state: SimulationState, agent: Agent): boolea
   return true;
 }
 
+export function pickBestPartnerForAgent(
+  state: SimulationState,
+  agent: Agent,
+  excludeId: number | null = null
+): Agent | null {
+  if (agent.isChild || agent.ageYears < AGE_PARTNER_MIN_YEARS || agent.jailedDays > 0) {
+    return null;
+  }
+  const pool = state.agents.filter(
+    (other) =>
+      other.id !== agent.id &&
+      other.id !== excludeId &&
+      !other.isChild &&
+      other.ageYears >= AGE_PARTNER_MIN_YEARS &&
+      other.partnerId === null &&
+      other.jailedDays <= 0 &&
+      !agent.exPartnerIds.includes(other.id)
+  );
+  if (pool.length === 0) return null;
+
+  const oppositeSex = pool.filter((o) => o.sex !== agent.sex);
+  const sameSex = pool.filter((o) => o.sex === agent.sex);
+
+  if (agent.wantsChildren) {
+    if (oppositeSex.length > 0) {
+      const familyMinded = oppositeSex.filter((o) => o.wantsChildren);
+      const preferred = familyMinded.length > 0 ? familyMinded : oppositeSex;
+      return [...preferred].sort(
+        (a, b) => Math.hypot(a.x - agent.x, a.y - agent.y) - Math.hypot(b.x - agent.x, b.y - agent.y)
+      )[0];
+    }
+    return null;
+  }
+
+  // Para quienes no desean hijos: predomina distinto sexo (~70%), pero pueden surgir parejas del mismo sexo (~30%)
+  if (oppositeSex.length > 0 && (sameSex.length === 0 || Math.random() < 0.7)) {
+    return oppositeSex[Math.floor(Math.random() * oppositeSex.length)];
+  }
+  if (sameSex.length > 0) {
+    return sameSex[Math.floor(Math.random() * sameSex.length)];
+  }
+  return null;
+}
+
 export function switchPartnerForAgent(
   state: SimulationState,
   agentId: number,
@@ -1764,15 +1893,7 @@ export function switchPartnerForAgent(
     }
   }
 
-  const candidate = state.agents.find(
-    (other) =>
-      other.id !== agent.id &&
-      other.id !== prevPartnerId &&
-      !other.isChild &&
-      other.ageYears >= AGE_PARTNER_MIN_YEARS &&
-      other.partnerId === null &&
-      !agent.exPartnerIds.includes(other.id)
-  );
+  const candidate = pickBestPartnerForAgent(state, agent, prevPartnerId);
 
   if (candidate) {
     agent.partnerId = candidate.id;
@@ -1866,6 +1987,38 @@ export function decideVillagerMajorAction(
       }
       if (agent.exPartnerIds.includes(partner.id) && Math.random() < 0.85) {
         return { approved: false, summary: 'Expareja reciente.' };
+      }
+      // Quienes quieren tener hijos priorizan firmemente pareja de distinto sexo para asegurar descendencia;
+      // las parejas del mismo sexo siguen existiendo como minoría entre quienes no buscan hijos o por libre albedrío.
+      if (agent.sex === partner.sex) {
+        const hasOppositeSingle = state.agents.some(
+          (o) =>
+            o.id !== agent.id &&
+            o.id !== partner.id &&
+            !o.isChild &&
+            o.ageYears >= AGE_PARTNER_MIN_YEARS &&
+            o.partnerId === null &&
+            o.jailedDays <= 0 &&
+            o.sex !== agent.sex
+        );
+        if ((agent.wantsChildren || partner.wantsChildren) && hasOppositeSingle) {
+          return {
+            approved: false,
+            summary: `${agent.name} busca formar familia y prioriza pareja de distinto sexo.`,
+          };
+        }
+        if ((agent.wantsChildren || partner.wantsChildren) && Math.random() < 0.85) {
+          return {
+            approved: false,
+            summary: `${agent.name} prefiere esperar pareja de distinto sexo para tener hijos.`,
+          };
+        }
+        if (Math.random() >= 0.35) {
+          return {
+            approved: false,
+            summary: 'Afinidad insuficiente para vínculo del mismo sexo.',
+          };
+        }
       }
       const canHaveKids =
         agent.sex !== partner.sex &&
@@ -2520,7 +2673,7 @@ export function collectTaxesAndRepayLoans(state: SimulationState): void {
 }
 
 export function assignMentorships(state: SimulationState): number {
-  const mentors = state.agents.filter(
+  const primaryMentors = state.agents.filter(
     (a) =>
       !a.isChild &&
       (a.job === 'Maestro' ||
@@ -2530,14 +2683,20 @@ export function assignMentorships(state: SimulationState): number {
         a.education >= 45 ||
         (a.jobMastery?.[a.job] ?? 0) > 70)
   );
-  if (mentors.length === 0) return 0;
+  const fallbackMentors = [...state.agents]
+    .filter((a) => !a.isChild && a.jailedDays <= 0)
+    .sort((a, b) => b.education - a.education);
+  if (primaryMentors.length === 0 && fallbackMentors.length === 0) return 0;
 
   let paired = 0;
   for (const agent of state.agents) {
     if (agent.mentorId !== null && state.agents.some((m) => m.id === agent.mentorId)) continue;
     agent.mentorId = null;
-    if (agent.ageYears >= 10 && (agent.job === 'Aprendiz' || agent.education < 30)) {
-      const mentor = mentors.find((m) => m.id !== agent.id && m.education > agent.education);
+    if (agent.ageYears >= 10 && (agent.job === 'Aprendiz' || agent.education < 45)) {
+      const mentor =
+        primaryMentors.find((m) => m.id !== agent.id && m.education > agent.education) ??
+        primaryMentors.find((m) => m.id !== agent.id && (m.job === 'Erudito' || m.job === 'Maestro')) ??
+        fallbackMentors.find((m) => m.id !== agent.id && m.education >= agent.education + 4);
       if (mentor) {
         agent.mentorId = mentor.id;
         agent.lastQwenDecision = `Contrato de aprendizaje con Maestro ${mentor.name}.`;
@@ -2584,7 +2743,221 @@ export function electRepresentative(state: SimulationState): Agent | null {
     a.isRepresentative = a.id === chosen.id;
   }
   state.representativeAgentId = chosen.id;
+  if (!state.representativeGoal) {
+    state.representativeGoal = 'Garantizar viviendas, alimento y progreso continuo';
+  }
+  chosen.lastQwenDecision = `Representante permanente dirigido por Qwen 2.5:3b (${state.representativeGoal}).`;
   return chosen;
+}
+
+export function ensureQwenControlledRepresentative(state: SimulationState): Agent | null {
+  const current =
+    state.representativeAgentId !== null
+      ? state.agents.find(
+          (a) =>
+            a.id === state.representativeAgentId &&
+            !a.isChild &&
+            a.ageYears >= 18 &&
+            a.jailedDays <= 0
+        )
+      : null;
+  if (current) {
+    for (const a of state.agents) {
+      a.isRepresentative = a.id === current.id;
+    }
+    return current;
+  }
+  const elected = electRepresentative(state);
+  if (elected) {
+    addLog(
+      state,
+      `${elected.name} asumió como Representante controlado por Qwen 2.5:3b.`,
+      'violet'
+    );
+  }
+  return elected;
+}
+
+/**
+ * Agente "Representante" controlado permanentemente por Qwen 2.5:3b (sandbox estricto de aldea).
+ * Evalúa escasez, viviendas, salud, saber y progreso para evitar el estancamiento y la extinción.
+ */
+export function runQwenRepresentativeAutonomousTurn(state: SimulationState): string[] {
+  const rep = ensureQwenControlledRepresentative(state);
+  if (!rep) return [];
+
+  const executed: string[] = [];
+  const totalFood =
+    state.agents.reduce((acc, a) => acc + a.inv.food + a.breadCount, 0) +
+    state.houses.reduce((acc, h) => acc + h.storage.food, 0);
+  const adults = state.agents.filter((a) => !a.isChild && a.ageYears >= 15 && a.jailedDays <= 0);
+  const homelessCount = state.agents.filter((a) => a.houseId === null).length;
+  const sickCount = state.agents.filter((a) => a.isSick).length;
+  const constructors = adults.filter((a) => a.job === 'Constructor');
+  const foodWorkers = adults.filter(
+    (a) => a.job === 'Recolector' || a.job === 'Agricultor' || a.job === 'Pescador'
+  );
+  const woodWorkers = adults.filter((a) => a.job === 'Leñador' || a.job === 'Carpintero');
+  const miners = adults.filter((a) => a.job === 'Minero');
+  const healers = adults.filter((a) => a.job === 'Curandero' || a.job === 'Boticario');
+  const scholars = adults.filter((a) => a.job === 'Erudito' || a.job === 'Maestro');
+
+  // El Representante siempre impulsa políticas de progreso y supervivencia de la especie
+  state.policies.buildPriority = true;
+  state.policies.workFocus = true;
+  state.policies.evolutionFocus = true;
+  if (state.agents.length < 28 && totalFood >= Math.floor(state.agents.length * 0.7)) {
+    state.policies.reproductionRestraint = false;
+  }
+  if (state.farms.length >= 1) {
+    state.policies.farmingFocus = true;
+  }
+
+  const pickReassignable = (
+    excludeJobs: JobType[],
+    fallbackExcludeJobs?: JobType[]
+  ): Agent | undefined => {
+    const findWith = (ex: JobType[]) =>
+      adults.find(
+        (a) =>
+          a.id !== rep.id &&
+          a.assignedBuildingId === null &&
+          !a.activeConstruction &&
+          !ex.includes(a.job)
+      ) ??
+      adults.find(
+        (a) =>
+          a.assignedBuildingId === null &&
+          !a.activeConstruction &&
+          !ex.includes(a.job)
+      );
+    return findWith(excludeJobs) ?? (fallbackExcludeJobs ? findWith(fallbackExcludeJobs) : undefined);
+  };
+
+  // 1) Crisis alimentaria: asegurar al menos 2-3 productores de comida
+  const minFoodWorkers = Math.min(adults.length, Math.max(2, Math.ceil(adults.length * 0.3)));
+  if (totalFood < state.agents.length * 1.4 && foodWorkers.length < minFoodWorkers) {
+    const cand = pickReassignable(['Recolector', 'Agricultor', 'Pescador', 'Constructor', 'Curandero']);
+    if (cand) {
+      const targetJob: JobType = state.farms.length > 0 ? 'Agricultor' : 'Recolector';
+      setAgentJob(state, cand, targetJob, 'decisión del Representante (Qwen 2.5)');
+      cand.taskTimer = 0;
+      executed.push(`${cand.name}→${targetJob} (alimento)`);
+    }
+  }
+
+  // 2) Viviendas urgentes: asegurar suficientes Constructores
+  const desiredConstructors = shouldBuildHouse(state)
+    ? Math.min(3, Math.max(2, Math.ceil(adults.length / 4)))
+    : Math.max(1, Math.floor(adults.length / 6));
+  if (constructors.length < desiredConstructors && adults.length >= 4) {
+    const cand = pickReassignable(['Constructor', 'Curandero', 'Pescador']);
+    if (cand) {
+      setAgentJob(state, cand, 'Constructor', 'decisión del Representante (Qwen 2.5)');
+      cand.taskTimer = 0;
+      executed.push(`${cand.name}→Constructor`);
+    }
+  }
+
+  // 3) Madera y minería base para poder levantar obras y subir de era
+  const currentFoodCount = () =>
+    adults.filter((a) => a.job === 'Recolector' || a.job === 'Agricultor' || a.job === 'Pescador').length;
+  if (woodWorkers.length === 0 && adults.length >= 5) {
+    const cand = pickReassignable(
+      ['Leñador', 'Constructor', 'Recolector', 'Curandero'],
+      currentFoodCount() > 2 ? ['Leñador', 'Constructor', 'Curandero'] : undefined
+    );
+    if (cand) {
+      setAgentJob(state, cand, 'Leñador', 'decisión del Representante (Qwen 2.5)');
+      cand.taskTimer = 0;
+      executed.push(`${cand.name}→Leñador`);
+    }
+  }
+  if (miners.length === 0 && adults.length >= 6) {
+    const cand = pickReassignable(
+      ['Minero', 'Constructor', 'Recolector', 'Leñador', 'Curandero'],
+      currentFoodCount() > 2 ? ['Minero', 'Constructor', 'Leñador', 'Curandero'] : undefined
+    );
+    if (cand) {
+      setAgentJob(state, cand, 'Minero', 'decisión del Representante (Qwen 2.5)');
+      cand.taskTimer = 0;
+      executed.push(`${cand.name}→Minero`);
+    }
+  }
+  if (scholars.length === 0 && adults.length >= 7) {
+    const cand = pickReassignable(
+      ['Erudito', 'Constructor', 'Recolector', 'Leñador', 'Minero', 'Curandero'],
+      currentFoodCount() > 2 ? ['Erudito', 'Constructor', 'Leñador', 'Minero', 'Curandero'] : undefined
+    );
+    if (cand) {
+      setAgentJob(state, cand, 'Erudito', 'decisión del Representante (Qwen 2.5)');
+      cand.taskTimer = 0;
+      executed.push(`${cand.name}→Erudito`);
+    }
+  }
+  const carpenters = adults.filter((a) => a.job === 'Carpintero');
+  if (carpenters.length === 0 && state.houses.length >= 2 && adults.length >= 8) {
+    const cand = pickReassignable(
+      ['Carpintero', 'Constructor', 'Minero', 'Erudito', 'Curandero', 'Leñador'],
+      currentFoodCount() > 2 ? ['Carpintero', 'Constructor', 'Minero', 'Erudito', 'Curandero'] : undefined
+    );
+    if (cand) {
+      setAgentJob(state, cand, 'Carpintero', 'decisión del Representante (Qwen 2.5)');
+      cand.taskTimer = 0;
+      executed.push(`${cand.name}→Carpintero`);
+    }
+  }
+  const farmers = adults.filter((a) => a.job === 'Agricultor');
+  if (farmers.length === 0 && state.farms.length >= 1 && adults.length >= 6) {
+    const cand = pickReassignable(
+      ['Agricultor', 'Constructor', 'Minero', 'Erudito', 'Carpintero', 'Curandero']
+    );
+    if (cand) {
+      setAgentJob(state, cand, 'Agricultor', 'decisión del Representante (Qwen 2.5)');
+      cand.taskTimer = 0;
+      executed.push(`${cand.name}→Agricultor`);
+    }
+  }
+
+  // 4) Salud: asignar Curandero si hay enfermos
+  if (sickCount > 0 && healers.length === 0 && adults.length >= 4) {
+    const cand = pickReassignable(['Curandero', 'Constructor']);
+    if (cand) {
+      setAgentJob(state, cand, 'Curandero', 'emergencia sanitaria del Representante');
+      cand.taskTimer = 0;
+      executed.push(`${cand.name}→Curandero`);
+    }
+  }
+
+  // 5) Contratos de aprendizaje y préstamos bancarios para obras
+  const pairedMentors = assignMentorships(state);
+  if (pairedMentors > 0) executed.push(`${pairedMentors} mentorías`);
+
+  if (isBuildingOperational(state, 'bank') && state.loans.length < 3) {
+    const needyBuilder = constructors.find((c) => c.coins < 12);
+    if (needyBuilder && grantBankLoan(state, needyBuilder, 15, 'impulso de obras del Representante')) {
+      executed.push(`Préstamo a ${needyBuilder.name}`);
+    }
+  }
+
+  // 6) Objetivo estratégico dinámico del Representante (Qwen 2.5:3b)
+  const scoredNeeds = scoreConstructionNeeds(state);
+  let goal =
+    scoredNeeds[0]?.reason ?? 'Consolidar crecimiento familiar, comercio y evolución de era';
+  if (sickCount > 0 && !isBuildingOperational(state, 'infirmary')) {
+    goal = `Atender ${sickCount} enfermo(s) e impulsar Hospital/alimento`;
+  } else if (homelessCount > 0) {
+    goal = `Construir viviendas urgentes (${homelessCount} sin casa) y reunir madera/piedra`;
+  } else if (totalFood < state.agents.length * 1.5 || state.farms.length === 0) {
+    goal = 'Asegurar alimento y levantar parcelas agrícolas para crecer';
+  }
+
+  state.representativeGoal = goal;
+  rep.qwenPlan = `Representante Qwen 2.5: ${goal}`;
+  rep.lastQwenDecision = `Qwen 2.5:3b dirigiendo como Representante (${goal}).`;
+  rep.thought = `Como Representante coordinado por Qwen 2.5:3b, priorizo: ${goal}.`;
+  syncSpecialBuildingStaff(state);
+  return executed;
 }
 
 export function createVillagePetition(
@@ -2939,6 +3312,7 @@ export function resolvePetition(
   const prefix = responder === 'Qwen 2.5' ? 'Qwen 2.5 (Qwen Responde)' : 'Intervención Divina';
   const msg = `${prefix} (${label} · "${petition.title}"): ${fulfillmentDetail}`;
   addLog(state, msg, positiveImpact ? 'emerald' : wasHeard ? 'rose' : 'amber');
+  pushSoundCue(state, positiveImpact ? 'celebration' : 'sadness');
   return msg;
 }
 
@@ -2984,6 +3358,7 @@ export function spawnFire(
   };
   state.fires.push(fire);
   addLog(state, `¡Fuego iniciado en (${Math.round(fire.x)}, ${Math.round(fire.y)}) por ${cause}!`, 'rose');
+  pushSoundCue(state, 'sadness');
   return fire;
 }
 
@@ -3001,6 +3376,7 @@ export function extinguishFire(
     advanceJobMastery(agent, agent.job, 3);
     agent.thought = 'Logré extinguir el incendio y proteger la aldea.';
     addLog(state, `${agent.name} extinguió el incendio provocado por ${fire.cause}.`, 'emerald');
+    pushSoundCue(state, 'celebration');
   } else {
     addLog(state, `El incendio (${fire.cause}) se extinguió.`, 'sky');
   }
@@ -3010,6 +3386,7 @@ export function extinguishFire(
 export function triggerLightningStorm(state: SimulationState): FireHazard | null {
   state.weather = 'thunderstorm';
   state.lightningFlashTimer = 18;
+  pushSoundCue(state, 'thunder');
   const targets: Array<{ x: number; y: number; kind: FireHazard['targetKind']; id?: number }> = [];
   for (const h of state.houses) targets.push({ x: h.x, y: h.y, kind: 'house', id: h.id });
   for (const b of state.specialBuildings) targets.push({ x: b.x, y: b.y, kind: 'special', id: b.id });
@@ -3030,12 +3407,12 @@ export function cancelActiveConstruction(
   const ac = agent.activeConstruction;
   if (!ac) return {};
 
-  const progress = clamp(ac.elapsed / Math.max(1, ac.totalDuration), 0, 1);
+  const progress = clamp((ac.elapsed ?? 0) / Math.max(1, ac.totalDuration ?? 1), 0, 1);
   const refunded: ResourceCostMap = {};
   const depots = getOperationalDepots(state);
   const targetDepot = depots[0] ?? state.specialBuildings.find((b) => b.type === 'general_depot') ?? null;
 
-  for (const [rawKey, totalQty] of Object.entries(ac.reservedMaterials)) {
+  for (const [rawKey, totalQty] of Object.entries(ac.reservedMaterials ?? {})) {
     const key = rawKey as keyof ResourceInventory;
     const qty = totalQty ?? 0;
     if (qty <= 0) continue;
@@ -3044,7 +3421,7 @@ export function cancelActiveConstruction(
     if (toRefund <= 0) continue;
 
     refunded[key] = toRefund;
-    const depotShare = Math.min(toRefund, ac.fromDepot[key] ?? 0);
+    const depotShare = Math.min(toRefund, ac.fromDepot?.[key] ?? 0);
     if (depotShare > 0) {
       if (targetDepot) {
         targetDepot.storage[key] += depotShare;
@@ -3423,6 +3800,7 @@ export function advanceDayAging(
       transferInheritance(state, agent);
       const cause = agent.illness ? `por ${agent.illness.name}` : `a los ${agent.ageYears} años`;
       addLog(state, `${agent.name} falleció ${cause}.`, 'rose');
+      pushSoundCue(state, 'sadness');
       continue;
     }
 
@@ -3434,6 +3812,7 @@ export function advanceDayAging(
   for (const baby of newbornList) {
     survivors.push(baby);
     addLog(state, `¡Nació ${baby.name} (${baby.parents}) tras 3 días de gestación! Nombre elegido por Qwen 2.5.`, 'emerald');
+    pushSoundCue(state, 'celebration');
   }
 
   const aliveIds = new Set(survivors.map((a) => a.id));
@@ -3451,7 +3830,8 @@ export function advanceDayAging(
   syncSpecialBuildingStaff(state);
   rebalanceBuildingOwnership(state);
   recalculateEconomyReserve(state);
-  electRepresentative(state);
+  ensureQwenControlledRepresentative(state);
+  runQwenRepresentativeAutonomousTurn(state);
 
   // Cambio automático de Estación (cada 30 días) + Bioma + Clima
   const nextSeason = computeSeason(state.day);
@@ -3624,6 +4004,9 @@ export function infectAgent(
   agent.thought = `Contraje ${info.name} (peligrosidad ${info.dangerPct}%).`;
   const msg = `${agent.name} enfermó de ${info.name} (peligro ${info.dangerPct}%${info.incurable ? ' · incurable' : ''}).`;
   addLog(state, msg, 'amber');
+  if (info.dangerPct >= 35 || info.incurable) {
+    pushSoundCue(state, 'sadness');
+  }
   return msg;
 }
 
@@ -3684,6 +4067,7 @@ export function killAgent(state: SimulationState, agentId: number): string | nul
 
   const msg = `${target.name} (${target.ageYears} años) murió por intervención divina.`;
   addLog(state, msg, 'rose');
+  pushSoundCue(state, 'sadness');
   return msg;
 }
 
@@ -4538,7 +4922,15 @@ export function completeActiveConstruction(state: SimulationState, builder: Agen
     }
   }
 
+  const prevEra = state.era;
   state.era = computeEra(state.knowledge, state.houses);
+  if (completed) {
+    if (state.era !== prevEra || ac.kind === 'plaza' || ac.kind === 'bridge') {
+      pushSoundCue(state, 'celebration');
+    } else {
+      pushSoundCue(state, 'build');
+    }
+  }
   return completed;
 }
 
@@ -5090,12 +5482,26 @@ export function buildQwenVillageTelemetry(state: SimulationState): Record<string
     pecesRio: `${state.riverFishStock}/${state.riverFishMaxStock}`,
   };
 
+  const rep =
+    state.representativeAgentId !== null
+      ? state.agents.find((a) => a.id === state.representativeAgentId) ?? null
+      : null;
+
   return {
     dia: state.day,
     estacion: state.season,
     clima: state.weather,
     bioma: state.biome,
     era: ERA_METADATA[state.era].label,
+    representanteActual: rep
+      ? {
+          nombre: rep.name,
+          oficio: rep.job,
+          saber: Math.round(rep.education),
+          objetivoQwen: state.representativeGoal ?? rep.qwenPlan,
+          controladoPor: 'Qwen 2.5:3b',
+        }
+      : null,
     poblacionTotal: state.agents.length,
     adultosAptosTrabajo: eligibleAdults.length,
     adultosLibresSinEdificio: freeOperators.length,
@@ -7057,3 +7463,378 @@ export function applyQwenActions(
   recalculateEconomyReserve(state);
   return executed;
 }
+
+export interface ScoredConstructionCandidate {
+  kind: ActiveConstruction['kind'];
+  specialType?: SpecialBuildingType;
+  farmSize?: FarmPlot['size'];
+  zone?: 'south' | 'north';
+  duration: number;
+  score: number;
+  reason: string;
+}
+
+/**
+ * Evaluador dinámico de prioridades de construcción basado en necesidades reales
+ * de la aldea (sin orden lineal rígido): salud, alimento, refugio, logística, saber y era.
+ */
+export function scoreConstructionNeeds(state: SimulationState): ScoredConstructionCandidate[] {
+  const candidates: ScoredConstructionCandidate[] = [];
+  const pop = Math.max(1, state.agents.length);
+  const homelessCount = state.agents.filter((a) => a.houseId === null).length;
+  const overcrowded = state.houses.some(
+    (h) => state.agents.filter((a) => a.houseId === h.id).length > h.capacity
+  );
+  const sickCount = state.agents.filter((a) => a.isSick).length;
+  const totalFood =
+    state.agents.reduce((acc, a) => acc + a.inv.food + a.breadCount, 0) +
+    state.houses.reduce((acc, h) => acc + h.storage.food, 0);
+  const avgEdu =
+    state.agents.reduce((acc, a) => acc + a.education, 0) / Math.max(1, state.agents.length);
+  const activeKinds = state.agents
+    .map((a) => a.activeConstruction)
+    .filter((ac): ac is ActiveConstruction => Boolean(ac));
+
+  const isBeingBuilt = (kind: ActiveConstruction['kind'], specialType?: SpecialBuildingType) =>
+    activeKinds.some((ac) => ac.kind === kind && (!specialType || ac.specialType === specialType));
+
+  const nextEraOrder: EraId[] = ['primitive', 'stone', 'wood', 'iron', 'civilization'];
+  const nextEraIdx = Math.min(nextEraOrder.length - 1, nextEraOrder.indexOf(state.era) + 1);
+  const nextEraMeta = ERA_METADATA[nextEraOrder[nextEraIdx]];
+  const needsMoreHousesForEra =
+    state.era !== 'civilization' && state.houses.length < nextEraMeta.minHouses;
+  const needsKnowledgeForEra =
+    state.era !== 'civilization' && state.knowledge < nextEraMeta.minKnowledge;
+
+  // 1. Vivienda
+  if (shouldBuildHouse(state) || (needsMoreHousesForEra && state.houses.length < 8)) {
+    const zone: 'south' | 'north' =
+      isBridgePassable(state) &&
+      state.houses.length >= 4 &&
+      state.houses.filter((h) => h.zone === 'north').length < 4
+        ? 'north'
+        : 'south';
+    const houseScore = homelessCount > 0 ? 145 : overcrowded ? 132 : 90;
+    candidates.push({
+      kind: 'house',
+      zone,
+      duration: 36,
+      score: houseScore,
+      reason:
+        homelessCount > 0
+          ? `Construir viviendas urgentes (${homelessCount} sin casa)`
+          : 'Ampliar viviendas para avanzar de Era y familias',
+    });
+  }
+
+  // 2. Parcelas de cultivo (prioridad crítica si escasea el alimento o el río está en veda/reposo)
+  const pendingFarms = activeKinds.filter((ac) => ac.kind === 'farm').length;
+  const foodCritical = totalFood < pop * 1.6 || state.riverFishStock === 0 || state.weather === 'drought';
+  const desiredFarms = foodCritical ? 3 : 2;
+  if (state.farms.length + pendingFarms < desiredFarms) {
+    candidates.push({
+      kind: 'farm',
+      farmSize: 'small',
+      zone: isBridgePassable(state) && state.farms.length >= 2 ? 'north' : 'south',
+      duration: 30,
+      score: state.farms.length === 0 ? 134 : foodCritical ? 124 : 96,
+      reason: 'Asegurar alimento y levantar parcelas agrícolas para crecer',
+    });
+  }
+
+  // 3. Edificios especiales evaluados por urgencia contextual
+  if (state.houses.length >= 1) {
+    const hasBuilding = (t: SpecialBuildingType) =>
+      state.specialBuildings.some((b) => b.type === t) || isBeingBuilt('special', t);
+
+    const specialScores: Array<{ type: SpecialBuildingType; score: number; reason: string }> = [];
+
+    if (!hasBuilding('infirmary')) {
+      specialScores.push({
+        type: 'infirmary',
+        score: sickCount > 0 ? 138 : 80,
+        reason: sickCount > 0 ? `Construir Hospital (${sickCount} enfermo/s)` : 'Prevenir enfermedades con Hospital',
+      });
+    }
+    if (!hasBuilding('apothecary')) {
+      specialScores.push({
+        type: 'apothecary',
+        score: sickCount > 0 ? 122 : 70,
+        reason: 'Producir medicinas en la Botica',
+      });
+    }
+    if (!hasBuilding('bakery')) {
+      specialScores.push({
+        type: 'bakery',
+        score: foodCritical ? 118 : 86,
+        reason: 'Multiplicar raciones con Panadería',
+      });
+    }
+    if (!hasBuilding('dock') && state.riverFishStock > 0) {
+      specialScores.push({
+        type: 'dock',
+        score: foodCritical ? 102 : 68,
+        reason: 'Aprovechar el río con Muelle Pesquero',
+      });
+    }
+    if (!hasBuilding('general_depot')) {
+      specialScores.push({
+        type: 'general_depot',
+        score: 108,
+        reason: 'Centralizar madera, piedra y minerales en Depósito General',
+      });
+    }
+    if (!hasBuilding('carpentry')) {
+      specialScores.push({
+        type: 'carpentry',
+        score: 98,
+        reason: 'Reducir costos de vivienda y trabajar maderas finas en Carpintería',
+      });
+    }
+    if (!hasBuilding('school')) {
+      specialScores.push({
+        type: 'school',
+        score: avgEdu < 55 || needsKnowledgeForEra ? 94 : 76,
+        reason: 'Acelerar Saber General y skills en la Escuela',
+      });
+    }
+    if (!hasBuilding('forge')) {
+      specialScores.push({
+        type: 'forge',
+        score: state.era === 'wood' || state.era === 'iron' ? 91 : 78,
+        reason: 'Forjar herramientas y lingotes en la Forja',
+      });
+    }
+    if (!hasBuilding('market')) {
+      specialScores.push({
+        type: 'market',
+        score: 83,
+        reason: 'Impulsar intercambio y comercio en el Mercado',
+      });
+    }
+    if (!hasBuilding('bank')) {
+      const precious = state.economyReserve.goldReserve + state.economyReserve.silverReserve;
+      specialScores.push({
+        type: 'bank',
+        score: precious >= 4 ? 75 : 64,
+        reason: 'Habilitar créditos e impuestos en Banco Central',
+      });
+    }
+    if (!hasBuilding('police_station')) {
+      const lawActive = state.laws.some((l) => l.active);
+      const wildBeasts = state.animals.some((a) => a.type === 'bear' || a.type === 'wildcat');
+      specialScores.push({
+        type: 'police_station',
+        score: lawActive || wildBeasts ? 92 : 66,
+        reason: 'Proteger la aldea y hacer cumplir leyes con Comisaría',
+      });
+    }
+    if (!hasBuilding('town_hall')) {
+      specialScores.push({
+        type: 'town_hall',
+        score: pop >= 12 ? 77 : 62,
+        reason: 'Consolidar gobernanza cívica en Ayuntamiento',
+      });
+    }
+    if (!hasBuilding('prison')) {
+      specialScores.push({
+        type: 'prison',
+        score: hasBuilding('police_station') ? 63 : 52,
+        reason: 'Completar sistema de justicia con Cárcel',
+      });
+    }
+
+    for (const entry of specialScores) {
+      if (hasAvailableOperatorForBuilding(state, entry.type)) {
+        candidates.push({
+          kind: 'special',
+          specialType: entry.type,
+          duration: 38,
+          score: entry.score,
+          reason: entry.reason,
+        });
+      }
+    }
+  }
+
+  // 4. Puente Fluvial y Plaza Central
+  if (state.bridge === null && (state.houses.length >= 2 || state.knowledge >= 18) && !isBeingBuilt('bridge')) {
+    const southNodesLeft = state.resources.filter(
+      (r) => !r.depleted && r.amount > 0 && r.y >= SAFE_LAND_MIN_Y
+    ).length;
+    candidates.push({
+      kind: 'bridge',
+      duration: 44,
+      score: southNodesLeft < 18 ? 104 : 88,
+      reason: 'Unir Zona Sur y Zona Norte con Puente Fluvial',
+    });
+  }
+  if (state.plaza === null && state.houses.length >= 2 && !isBeingBuilt('plaza')) {
+    candidates.push({
+      kind: 'plaza',
+      duration: 42,
+      score: 84,
+      reason: 'Construir Plaza Central para cohesión y cultura',
+    });
+  }
+
+  // 5. Mejoras de viviendas y edificios existentes
+  if (state.houses.some((h) => h.level < ERA_METADATA[state.era].maxHouseLevel)) {
+    candidates.push({
+      kind: 'upgrade_house',
+      duration: 36,
+      score: overcrowded ? 88 : 68,
+      reason: 'Mejorar viviendas existentes a nivel superior',
+    });
+  }
+  for (const sb of state.specialBuildings) {
+    if (sb.level < 3 && !isBeingBuilt('upgrade_special', sb.type)) {
+      candidates.push({
+        kind: 'upgrade_special',
+        specialType: sb.type,
+        duration: 40,
+        score: 60,
+        reason: `Mejorar ${sb.name} a Nivel ${sb.level + 1}`,
+      });
+    }
+  }
+
+  return candidates.sort((a, b) => b.score - a.score);
+}
+
+export type ConstructionPlanResult = ReturnType<typeof validateAndComputeConstructionPlan>;
+
+export function planBestConstructionProject(
+  state: SimulationState,
+  builder: Agent
+): {
+  topGoal: { candidate: ScoredConstructionCandidate; plan: ConstructionPlanResult } | null;
+  bestBuildable: { candidate: ScoredConstructionCandidate; plan: ConstructionPlanResult } | null;
+} {
+  const scored = scoreConstructionNeeds(state);
+  const depots = getOperationalDepots(state);
+  const canAffordCost = (cost: ResourceCostMap): boolean => {
+    for (const [rawKey, rawNeed] of Object.entries(cost)) {
+      const key = rawKey as keyof ResourceInventory;
+      const need = rawNeed ?? 0;
+      if (need <= 0) continue;
+      const avail = builder.inv[key] + depots.reduce((acc, d) => acc + d.storage[key], 0);
+      if (avail < need) return false;
+    }
+    return true;
+  };
+
+  let topGoal: { candidate: ScoredConstructionCandidate; plan: ConstructionPlanResult } | null = null;
+  let bestBuildable: { candidate: ScoredConstructionCandidate; plan: ConstructionPlanResult } | null = null;
+
+  for (const candidate of scored) {
+    const plan = validateAndComputeConstructionPlan(state, builder, candidate.kind, {
+      zone: candidate.zone,
+      farmSize: candidate.farmSize,
+      specialType: candidate.specialType,
+    });
+    if (!plan.ok) continue;
+    if (!topGoal) topGoal = { candidate, plan };
+    if (canAffordCost(plan.cost)) {
+      bestBuildable = { candidate, plan };
+      break;
+    }
+  }
+
+  return { topGoal, bestBuildable };
+}
+
+/**
+ * Actualiza partidas guardadas de versiones anteriores o aldeas estancadas/al borde
+ * de la extinción sin obligar al usuario a pulsar "Reiniciar".
+ */
+export function migrateAndRecoverVillageState(state: SimulationState): {
+  migrated: boolean;
+  rescued: boolean;
+  notes: string[];
+} {
+  const notes: string[] = [];
+  const prevVersion = state.schemaVersion ?? 1;
+  let migrated = false;
+  let rescued = false;
+
+  if (prevVersion < CURRENT_SCHEMA_VERSION) {
+    state.schemaVersion = CURRENT_SCHEMA_VERSION;
+    state.policies = {
+      ...state.policies,
+      buildPriority: true,
+      workFocus: true,
+      evolutionFocus: true,
+    };
+    migrated = true;
+    notes.push('Políticas de progreso continuo activadas en partida heredada.');
+  } else {
+    state.schemaVersion = CURRENT_SCHEMA_VERSION;
+  }
+
+  // Limpiar obras trabadas de versiones viejas o constructores que cambiaron de oficio
+  for (const agent of state.agents) {
+    if (!Number.isFinite(agent.taskTimer) || agent.taskTimer > 80) {
+      agent.taskTimer = 0;
+    }
+    if (agent.activeConstruction && agent.job !== 'Constructor') {
+      cancelActiveConstruction(state, agent, 'recuperación de partida guardada');
+      notes.push(`Obra pendiente de ${agent.name} reintegrada al depósito.`);
+    }
+  }
+
+  // Reparar nodos marcados como depleted por error cuando aún tienen cantidad > 0
+  for (const node of state.resources) {
+    if (node.amount > 0 && node.depleted) {
+      node.depleted = false;
+      node.restTimer = 0;
+    }
+  }
+
+  // Asegurar Representante permanente bajo Qwen 2.5:3b
+  const rep = ensureQwenControlledRepresentative(state);
+  if (rep) {
+    runQwenRepresentativeAutonomousTurn(state);
+  }
+
+  // Rescate anti-extinción para partidas heredadas críticamente bajas
+  const livingAdults = state.agents.filter((a) => !a.isChild && a.ageYears >= 15);
+  const totalFood =
+    state.agents.reduce((acc, a) => acc + a.inv.food + a.breadCount, 0) +
+    state.houses.reduce((acc, h) => acc + h.storage.food, 0);
+  const activeFoodNodes = state.resources.filter(
+    (r) => r.type === 'food' && !r.depleted && r.amount > 0
+  ).length;
+
+  if (livingAdults.length > 0 && (livingAdults.length <= 3 || (totalFood === 0 && activeFoodNodes === 0 && state.farms.length === 0))) {
+    state.policies.reproductionRestraint = false;
+    state.resourcesPaused = false;
+    if (activeFoodNodes === 0) {
+      for (const r of state.resources) {
+        if (r.type === 'food') {
+          r.amount = Math.max(4, Math.round(r.maxAmount * 0.5));
+          r.depleted = false;
+          r.restTimer = 0;
+        }
+      }
+    }
+    for (const a of livingAdults) {
+      if (a.hunger > 85) a.hunger = 65;
+    }
+    rescued = true;
+    notes.push('Protocolo anti-extinción activado por el Representante Qwen 2.5.');
+  }
+
+  if (migrated || rescued) {
+    addLog(
+      state,
+      migrated
+        ? 'Partida actualizada al motor dinámico v2 conservando todo tu progreso.'
+        : 'Protocolo anti-extinción aplicado automáticamente para recuperar la aldea.',
+      'sky'
+    );
+  }
+
+  return { migrated, rescued, notes };
+}
+

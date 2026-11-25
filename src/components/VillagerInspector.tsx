@@ -937,7 +937,7 @@ export function VillagerInspector({
             </h2>
             {agent.isRepresentative && (
               <span className="px-1.5 py-0.5 rounded bg-violet-950/80 border border-violet-600/70 text-[10px] font-semibold text-violet-200">
-                Representante
+                Representante · Qwen 2.5:3b
               </span>
             )}
             {agent.jailedDays > 0 && (
